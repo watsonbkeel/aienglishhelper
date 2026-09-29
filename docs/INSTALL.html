@@ -121,6 +121,19 @@ ASR_BASE_URL=https://你的语音服务实际API根地址/v1
 ASR_MODEL=该服务实际转写模型ID
 ASR_API_KEY=仅在服务器填写
 </code></pre>
+<p><strong>当前线上配置（2026-09-29）</strong>：英文和中文识别都走香港 GPU 服务器上的 Qwen3-ASR（<code>http://&lt;香港ASR的Tailscale地址&gt;:3102/v1</code>，仅 Tailscale 内网，无公网），每句约 0.2 秒；本机 Vosk 小模型只做兜底。</p>
+<pre><code class="language-ini">ASR_BACKEND=http
+ASR_BASE_URL=http://&lt;香港ASR的Tailscale地址&gt;:3102/v1
+ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+ASR_API_KEY=
+ASR_LANGUAGE_MAP=en:English,zh:Chinese
+ASR_FALLBACK=vosk
+ASR_TIMEOUT=3
+ASR_RETRY_AFTER=60
+ASR_MIN_RMS=200
+VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
+</code></pre>
+<ul><li>该服务的 language 必须是 <code>English</code>/<code>Chinese</code>，传 <code>en</code>/<code>zh</code> 会返回 502，所以要配 <code>ASR_LANGUAGE_MAP</code>。</li><li>云端模型对静音、持续噪声会编出 &quot;Okay.&quot; &quot;I&#x27;m sorry.&quot;；<code>ASR_MIN_RMS</code> 先判断有没有人声，没有就按“没听清”处理（不降级、不送云端）。</li><li>云端失败或超过 <code>ASR_TIMEOUT</code> 秒，本轮改用本机 Vosk，之后 <code>ASR_RETRY_AFTER</code> 秒内直接走本机，不让每轮都等超时。</li><li>服务不需要密钥时 <code>ASR_API_KEY</code> 留空即可。学生录音会传到香港服务器转文字。</li></ul>
 <p>该模式要求服务支持 <code>POST /audio/transcriptions</code>，multipart 上传 WAV，返回包含 <code>text</code> 的 JSON。不要把 DeepSeek 文本对话接口填到 ASR 地址，它并不是本适配器的录音转写接口。没有返回置信度的服务会保留 <code>confidence=null</code>，程序不伪造识别分数。</p>
 <h3>4.3 语音合成</h3>
 <p>默认延续原 aibot 使用的 Edge TTS 方式：</p>
@@ -252,6 +265,8 @@ sudo .venv/bin/python -m pi.english_voice \
 <p>微信开发者工具选择「导入项目」，项目目录选择 <code>miniprogram</code>。使用你自己的合法 AppID 和已授权的开发微信号；包里的 <code>touristappid</code> 仅是避免冒用真实 AppID 的占位，不能替代真实手机预览所需条件。</p>
 <p>配置小程序后台 <code>request</code> 合法域名为你的公共 HTTPS 域名。在正式手机网络条件下测试，不把开发者工具中临时关闭域名校验当成最终部署办法。</p>
 <p>首次打开配置页会读取公共服务。也可以展开页面底部的「课堂连接设置」，输入公共服务根地址、学生 ID 和家长课堂凭证。地址只填根地址，不加 <code>/api/config</code>，也不填 <code>/students/s001</code>。</p>
+<p>没有 <code>english-env.local.js</code> 时，小程序会读取仓库自带的 <code>utils/english-env.example.js</code>（全部为空），配置页显示「还没有连接课堂」提示并自动展开课堂连接设置，不会发出请求；测试和构建也不依赖本地文件。</p>
+<p>自带大模型放在配置页最下方「高级设置」里，默认收起，单独保存；换接口地址时必须重新填写 API Key，保存前会按课程判题格式做一次 20 秒内的测试调用。</p>
 <p>页面会把手动填写的连接保存在本地。之后更换 <code>english-env.local.js</code> 但页面仍连接旧账号时，修改课堂连接设置，或在开发者工具清除该小程序缓存。</p>
 <p>测试：修改年级／学期／练习组 → 保存 → 在文字终端重新 <code>/start</code> → 检查新范围生效 → 完成几次练习 → 打开结果页刷新。</p>
 <h3>7.2 合入现有 WordMaster_SZ</h3>

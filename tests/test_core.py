@@ -124,13 +124,13 @@ def test_old_saved_config_gets_default_practice_words(db):
 class FakeProviders:
     """Test double only: records which model answered; never used in production."""
     llm_model='deepseek-flash'
-    def __init__(self): self.calls=[];self.student_fail=False;self.student_text='{"ok":true}'
+    def __init__(self): self.calls=[];self.student_fail=False;self.student_text='{"correct":true}';self.last=None
     def check_llm_url(self,url):
         from english_class.providers import validate_llm_url
         return validate_llm_url(url,resolve=lambda h,p,type=0:[(0,0,0,'',('10.0.0.5' if h=='intranet.example' else '8.8.8.8',p))])
-    async def chat(self,messages,json_output=False,llm=None):
+    async def chat(self,messages,json_output=False,llm=None,timeout=None):
         from english_class.providers import ProviderError
-        self.calls.append('student' if llm else 'platform')
+        self.calls.append('student' if llm else 'platform');self.last={'messages':messages,'json_output':json_output,'timeout':timeout}
         if llm and (self.student_fail or llm['api_key']=='bad-key-123456'): raise ProviderError('自带模型的密钥无效或无权限')
         return self.student_text if llm else '{"ok":"platform"}'
 
@@ -188,3 +188,63 @@ def test_llm_url_guard_blocks_private_targets():
     for bad in ('http://api.x.com','https://user:pw@api.x.com','https://api.x.com?a=1','https://127.0.0.1','https://[::1]','https://169.254.169.254','ftp://x.com'):
         with pytest.raises(ValueError): validate_llm_url(bad,resolve=pub)
     with pytest.raises(ValueError): validate_llm_url('https://api.x.com',resolve=lambda h,p,type=0:[(0,0,0,'',('192.168.1.8',p))])
+
+
+def test_old_database_gets_evidence_columns_without_losing_progress(tmp_path,dictionary_path):
+    import sqlite3
+    from english_class.store import Store
+    from english_class.dictionary import Dictionary
+    path=tmp_path/'old.sqlite3';con=sqlite3.connect(path)
+    con.executescript('''CREATE TABLE students (id TEXT PRIMARY KEY, config TEXT NOT NULL);
+    CREATE TABLE progress (student_id TEXT NOT NULL REFERENCES students(id), word_id TEXT NOT NULL, status INTEGER NOT NULL DEFAULT 0 CHECK(status BETWEEN 0 AND 2), unclear_count INTEGER NOT NULL DEFAULT 0, last_practiced_date TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(student_id,word_id));
+    INSERT INTO students VALUES ('s001','{}');
+    INSERT INTO progress VALUES ('s001','1a_021',2,3,'2026-09-01','2026-09-01T10:00:00+08:00');''')
+    con.commit();con.close()
+    db=Store(path,Dictionary(dictionary_path))
+    row=db.progress('s001')['words'][0]
+    assert (row['status'],row['unclear_count'],row['last_practiced_date'])==(2,3,'2026-09-01')
+    assert (row['valid_count'],row['used_word_count'],row['imitated_count'])==(0,0,0)
+    Store(path,Dictionary(dictionary_path))  # 再次打开不重复加列
+
+
+def test_progress_evidence_accumulates_and_never_changes_status_rules(client):
+    def post(status,evidence,unclear=False,key=None):
+        h=headers('brain')
+        if key: h['Idempotency-Key']=key
+        body={'word_id':'1a_021','status':status,'unclear':unclear}
+        if evidence is not None: body['evidence']=evidence
+        return client.post('/api/progress?student_id=s001',json=body,headers=h)
+    r=post(None,{'answer_valid':True,'used_word':True,'imitated':True},key='ev-1').json()
+    assert r['status']==0 and (r['valid_count'],r['used_word_count'],r['imitated_count'])==(1,1,1)
+    assert post(None,{'answer_valid':True,'used_word':True,'imitated':True},key='ev-1').json()['imitated_count']==1
+    assert post(None,{'answer_valid':False,'used_word':True,'imitated':True},key='ev-1').status_code==409
+    r=post(1,{'answer_valid':True,'used_word':False,'imitated':False}).json()
+    assert r['status']==1 and r['valid_count']==2 and r['used_word_count']==1
+    assert post(None,{'answer_valid':True},unclear=True).status_code==422
+    assert post(None,{'bogus':True}).status_code==422
+    assert post(None,None).json()['valid_count']==2
+
+
+def test_student_llm_changing_address_requires_new_key(llm_client):
+    c,fake,db=llm_client
+    ok={'base_url':'https://api.example.com/v1','model':'m1','api_key':'sk-first-key-123456'}
+    assert c.put('/api/llm?student_id=s001',json=ok,headers=headers()).status_code==200
+    # 同一地址（写法不同）改模型可沿用旧密钥
+    assert c.put('/api/llm?student_id=s001',json={**ok,'base_url':'https://api.example.com/v1/','model':'m2','api_key':None},headers=headers()).status_code==200
+    r=c.put('/api/llm?student_id=s001',json={**ok,'base_url':'https://other.example.com/v1','api_key':None},headers=headers())
+    assert r.status_code==422 and '密钥' in r.json()['detail']
+    assert db.llm('s001')['base_url']=='https://api.example.com/v1'
+    assert c.put('/api/llm?student_id=s001',json={**ok,'base_url':'https://other.example.com/v1','api_key':'sk-second-key-1234'},headers=headers()).status_code==200
+
+
+def test_student_llm_save_test_uses_course_json_format_and_short_timeout(llm_client):
+    c,fake,db=llm_client
+    ok={'base_url':'https://api.example.com','model':'m1','api_key':'sk-first-key-123456'}
+    assert c.put('/api/llm?student_id=s001',json=ok,headers=headers()).status_code==200
+    assert fake.last['json_output'] is True and fake.last['timeout']==20
+    assert 'VOCABULARY_JUDGE' in fake.last['messages'][0]['content']
+    for bad in ('OK','{"correct":"yes"}','[1]','{"ok":true}'):
+        fake.student_text=bad
+        r=c.put('/api/llm?student_id=s001',json={**ok,'model':'m-bad'},headers=headers())
+        assert r.status_code==422 and '格式' in r.json()['detail'],bad
+    assert db.llm('s001')['model']=='m1'

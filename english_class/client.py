@@ -30,8 +30,10 @@ class PublicClient:
         result=await self.request('GET','/api/words',params={k:cfg[k] for k in ('grade','semester','unit')})
         return result['words']
     async def progress(self): return await self.request('GET','/api/progress')
-    async def record(self,word_id,status,unclear,key):
-        return await self.request('POST','/api/progress',body={'word_id':word_id,'status':status,'unclear':unclear},event_key=key)
+    async def record(self,word_id,status,unclear,key,evidence=None):
+        body={'word_id':word_id,'status':status,'unclear':unclear}
+        if evidence is not None: body['evidence']=evidence
+        return await self.request('POST','/api/progress',body=body,event_key=key)
     async def chat(self,messages,json_output=True):
         return (await self.request('POST','/internal/chat',body={'messages':messages,'json_output':json_output}))['content']
     async def transcribe(self,wav,language):

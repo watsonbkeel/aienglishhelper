@@ -2,6 +2,7 @@
   <view class="eyebrow">我的课程作品 · 英语陪练</view>
   <view class="title">今天，练什么？</view>
   <view class="subtitle">家长设置，孩子用自己的机器人听和说。</view>
+  <view class="notice" wx:if="{{unconfigured}}">还没有连接课堂服务。请在下方「课堂连接设置」填写老师提供的地址、学生ID和家长凭证。</view>
   <view class="error" wx:if="{{error}}">{{error}}</view>
   <view class="card">
     <view class="section-title">学习范围</view>
@@ -20,7 +21,11 @@
     <view class="row"><view><text>中文辅助</text><view class="note">需要时提供中文解释</view></view><switch checked="{{form.chinese_help}}" bindchange="onChinese" disabled="{{saving || loading}}" color="#245CCC" /></view>
     <view class="note">一次练习先复习几个词，再完成一个短对话。完成任务后可以提前结束。</view>
   </view>
-  <view class="card">
+  <button class="primary" bindtap="onSave" loading="{{saving || loading}}" disabled="{{saving || loading || !ready}}">保存设置</button>
+  <button class="secondary" bindtap="onResult">看看练习结果</button>
+  <view class="start-tip">保存后，对机器人说：<text class="quote">“小爱同学，开始今天的英语练习。”</text>新设置在下一轮开始时生效。</view>
+  <view class="connection-link" bindtap="onToggleAdvanced">{{advancedOpen ? '收起' : '展开'}}高级设置：自带大模型（可选）{{llm.mode === 'custom' ? ' · 使用中' : ''}}</view>
+  <view class="card" wx:if="{{advancedOpen}}">
     <view class="section-title">大模型（可选）</view>
     <view class="note" wx:if="{{llm.mode !== 'custom'}}">当前使用平台提供的模型{{llm.platform_model ? '（' + llm.platform_model + '）' : ''}}。填写自己的模型后优先用自己的，出错时自动换回平台模型。</view>
     <view class="note" wx:if="{{llm.mode === 'custom'}}">当前使用自己的模型：{{llm.model}}，密钥 {{llm.key_hint}}。{{llm.last_status === 'fallback' ? '最近一次调用失败，已临时用平台模型：' + llm.last_error : '最近调用正常。'}}</view>
@@ -28,17 +33,14 @@
     <view class="field-label">接口地址（兼容 OpenAI 格式）</view><input class="input" placeholder="https://api.deepseek.com" value="{{llmForm.base_url}}" data-field="base_url" bindinput="onLlmInput" disabled="{{llmBusy}}" />
     <view class="field-label">模型名</view><input class="input" placeholder="deepseek-chat" value="{{llmForm.model}}" data-field="model" bindinput="onLlmInput" disabled="{{llmBusy}}" />
     <view class="field-label">API Key</view><input class="input" password="{{true}}" placeholder="{{llm.mode === 'custom' ? '不改密钥可留空' : 'sk-...'}}" value="{{llmForm.api_key}}" data-field="api_key" bindinput="onLlmInput" disabled="{{llmBusy}}" />
-    <view class="note">保存时会先测试调用一次，通过才生效。密钥只保存在课堂服务器，不存在手机里。</view>
+    <view class="note">这里是单独保存的，和上面的「保存设置」无关。保存时会先测试调用一次，通过才生效。密钥只保存在课堂服务器，不存在手机里。</view>
     <button class="secondary" bindtap="onSaveLlm" loading="{{llmBusy}}" disabled="{{llmBusy || !ready}}">测试并保存</button>
     <button class="secondary" wx:if="{{llm.mode === 'custom'}}" bindtap="onClearLlm" disabled="{{llmBusy}}">改回平台模型</button>
   </view>
-  <button class="primary" bindtap="onSave" loading="{{saving || loading}}" disabled="{{saving || loading || !ready}}">保存设置</button>
-  <button class="secondary" bindtap="onResult">看看练习结果</button>
-  <view class="start-tip">保存后，对机器人说：<text class="quote">“小爱同学，开始今天的英语练习。”</text>新设置在下一轮开始时生效。</view>
   <view class="connection-link" bindtap="onToggleConnection">{{connectionOpen ? '收起' : '展开'}}课堂连接设置</view>
   <view class="card" wx:if="{{connectionOpen}}">
     <view class="section-title">老师提供的连接信息</view>
-    <view class="note">这里只填课堂凭证。自己的大模型在上方「大模型（可选）」里设置。</view>
+    <view class="note">这里只填课堂凭证。自己的大模型在页面下方「高级设置」里单独设置。</view>
     <view class="field-label">公共服务地址</view><input class="input" placeholder="https://你的公共服务域名" value="{{connection.baseUrl}}" data-field="baseUrl" bindinput="onConnectionInput" />
     <view class="field-label">学生ID</view><input class="input" placeholder="s001" value="{{connection.studentId}}" data-field="studentId" bindinput="onConnectionInput" />
     <view class="field-label">本人的家长端课堂凭证</view><input class="input" password="{{true}}" placeholder="老师分配的 parent 凭证" value="{{connection.token}}" data-field="token" bindinput="onConnectionInput" />

@@ -3,9 +3,15 @@ function statusText(row) {
   if (row.status === 1) return '听懂了'
   return row.last_practiced_date ? '继续练习' : '没练过'
 }
+function evidenceText(row) {
+  // 旧记录没有这些字段时不显示，避免把“没有数据”说成“0 次”。
+  if (!row.used_word_count && !row.imitated_count) return ''
+  const own = `累计说出目标词 ${row.used_word_count || 0} 次`
+  return row.imitated_count ? `${own}，其中跟读/模仿 ${row.imitated_count} 次（跟读不算会说）` : own
+}
 function buildReport(payload) {
   if (!payload || !Array.isArray(payload.words) || typeof payload.today !== 'string') throw new Error('进度数据格式不正确')
-  const decorate = row => ({ ...row, stateText: statusText(row), unclearText: `系统累计没听清 ${row.unclear_count || 0} 次` })
+  const decorate = row => ({ ...row, stateText: statusText(row), unclearText: `系统累计没听清 ${row.unclear_count || 0} 次`, evidenceText: evidenceText(row) })
   const allWords = payload.words.map(decorate)
   const todayWords = allWords.filter(row => row.last_practiced_date === payload.today)
   return { today: payload.today, todayWords, allWords, speakingCount: todayWords.filter(x => x.status === 2).length,

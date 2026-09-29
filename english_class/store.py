@@ -13,6 +13,9 @@ from .models import LearningConfig
 class Conflict(ValueError):
     pass
 
+# 每次练习的附加证据 → 累计次数字段。只用于展示“回答有效/用了目标词/模仿跟读”，不影响 status 规则。
+EVIDENCE_COLUMNS={'answer_valid':'valid_count','used_word':'used_word_count','imitated':'imitated_count'}
+
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -31,6 +34,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS student_llm (student_id TEXT PRIMARY KEY REFERENCES students(id), base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, updated_at TEXT NOT NULL, last_status TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', last_used_at TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS events (student_id TEXT NOT NULL REFERENCES students(id), event_key TEXT NOT NULL, fingerprint TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(student_id,event_key));
             ''')
+            # 只追加字段（老库原地升级），不删除、不改写已有进度。
+            have={r['name'] for r in con.execute('PRAGMA table_info(progress)')}
+            for col in EVIDENCE_COLUMNS.values():
+                if col not in have: con.execute(f'ALTER TABLE progress ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0')
 
     def connect(self):
         con = sqlite3.connect(self.path, timeout=15)
@@ -108,7 +115,7 @@ class Store:
             rows=con.execute('SELECT * FROM progress WHERE student_id=? ORDER BY updated_at DESC, word_id',(student_id,)).fetchall()
         return {'today':self.today(),'words':[self._decorate(r) for r in rows]}
 
-    def record(self,student_id: str,word_id: str,status: int | None,unclear: bool,event_key: str | None=None) -> dict:
+    def record(self,student_id: str,word_id: str,status: int | None,unclear: bool,event_key: str | None=None,evidence: dict | None=None) -> dict:
         if word_id not in self.dictionary.by_id:
             raise ValueError('未知的词库word_id')
         if status is not None and (type(status) is not int or status not in (0,1,2)):
@@ -117,7 +124,13 @@ class Store:
             raise ValueError('没听清时不得更新状态')
         if event_key is not None and not 1<=len(event_key)<=128:
             raise ValueError('无效事件编号')
-        fingerprint=hashlib.sha256(json.dumps([word_id,status,unclear]).encode()).hexdigest()
+        evidence=evidence or {}
+        if set(evidence)-set(EVIDENCE_COLUMNS) or any(type(v) is not bool for v in evidence.values()):
+            raise ValueError('evidence只能包含answer_valid/used_word/imitated布尔值')
+        if unclear and any(evidence.values()): raise ValueError('没听清时不得记录回答证据')
+        inc=[int(evidence.get(k,False)) for k in EVIDENCE_COLUMNS]
+        # 不带 evidence 的旧请求指纹保持不变，重放兼容。
+        fingerprint=hashlib.sha256(json.dumps([word_id,status,unclear]+([inc] if evidence else [])).encode()).hexdigest()
         now=datetime.now(self.timezone)
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
@@ -126,9 +139,10 @@ class Store:
                 if prior:
                     if prior['fingerprint']!=fingerprint: raise Conflict('同一请求编号不能提交不同结果')
                     return json.loads(prior['result'])
-            con.execute('''INSERT INTO progress(student_id,word_id,status,unclear_count,last_practiced_date,updated_at) VALUES (?,?,?,?,?,?)
-            ON CONFLICT(student_id,word_id) DO UPDATE SET status=MAX(progress.status,excluded.status), unclear_count=progress.unclear_count+excluded.unclear_count,last_practiced_date=excluded.last_practiced_date,updated_at=excluded.updated_at''',
-                        (student_id,word_id,status or 0,int(unclear),now.date().isoformat(),now.isoformat()))
+            con.execute('''INSERT INTO progress(student_id,word_id,status,unclear_count,last_practiced_date,updated_at,valid_count,used_word_count,imitated_count) VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(student_id,word_id) DO UPDATE SET status=MAX(progress.status,excluded.status), unclear_count=progress.unclear_count+excluded.unclear_count,last_practiced_date=excluded.last_practiced_date,updated_at=excluded.updated_at,
+            valid_count=progress.valid_count+excluded.valid_count,used_word_count=progress.used_word_count+excluded.used_word_count,imitated_count=progress.imitated_count+excluded.imitated_count''',
+                        (student_id,word_id,status or 0,int(unclear),now.date().isoformat(),now.isoformat(),*inc))
             row=con.execute('SELECT * FROM progress WHERE student_id=? AND word_id=?',(student_id,word_id)).fetchone()
             result=self._decorate(row)
             if event_key: con.execute('INSERT INTO events VALUES (?,?,?,?)',(student_id,event_key,fingerprint,json.dumps(result,ensure_ascii=False)))

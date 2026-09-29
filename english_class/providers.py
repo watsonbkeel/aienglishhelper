@@ -1,13 +1,16 @@
 """Teacher-owned providers. No silent demo responses on real-service errors."""
 from __future__ import annotations
+import array
 import asyncio
 import io
 import ipaddress
 import json
+import math
 import os
 import socket
 import subprocess
 import tempfile
+import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,6 +58,17 @@ def mask_key(key:str) -> str:
     return (key[:3]+'…'+key[-4:]) if len(key)>=12 else '已设置'
 
 
+def has_speech(pcm:bytes,min_rms:float,rate:int=16000) -> bool:
+    """粗判是否有人说话：按30毫秒分帧，响的帧要够响，且明显高于底噪（静音、持续白噪声都不算）。"""
+    a=array.array('h');a.frombytes(pcm[:len(pcm)//2*2])
+    size=rate*30//1000
+    levels=sorted(math.sqrt(sum(v*v for v in a[i:i+size])/size) for i in range(0,len(a)-size+1,size))
+    if not levels: return False
+    loud=levels[int(len(levels)*0.9)] if len(levels)>=10 else levels[-1]
+    floor=levels[int(len(levels)*0.1)]
+    return loud>=min_rms and loud>=2*max(floor,1.0)
+
+
 def pcm_wav(pcm:bytes,rate:int=16000) -> bytes:
     out=io.BytesIO()
     with wave.open(out,'wb') as w:
@@ -70,6 +84,11 @@ class Providers:
     asr_base:str=''
     asr_key:str=''
     asr_model:str=''
+    asr_language_map:str=''          # 例 en:English,zh:Chinese（Qwen3-ASR 要求语言全名）
+    asr_fallback:str=''              # vosk：云端失败/超时改用本机 Vosk
+    asr_timeout:float=8.0
+    asr_retry_after:float=60.0       # 云端失败后这段时间直接走本机，不让每轮都等超时
+    asr_min_rms:float=200.0          # 仅 http 模式：低于此音量或没有起伏的录音按“没听清”处理；0 关闭
     vosk_en:str='models/vosk-model-small-en-us-0.15'
     vosk_zh:str='models/vosk-model-small-cn-0.22'
     tts_backend:str='edge'
@@ -80,21 +99,27 @@ class Providers:
     voice_en:str='en-US-JennyNeural'
     voice_zh:str='zh-CN-XiaoxiaoNeural'
     _models:dict=field(default_factory=dict,init=False,repr=False)
+    _asr_down_until:float=field(default=0.0,init=False,repr=False)
 
     @classmethod
     def from_env(cls):
         mapping={'llm_base':'LLM_BASE_URL','llm_key':'LLM_API_KEY','llm_model':'LLM_MODEL',
                  'asr_backend':'ASR_BACKEND','asr_base':'ASR_BASE_URL','asr_key':'ASR_API_KEY','asr_model':'ASR_MODEL',
+                 'asr_language_map':'ASR_LANGUAGE_MAP','asr_fallback':'ASR_FALLBACK','asr_timeout':'ASR_TIMEOUT',
+                 'asr_retry_after':'ASR_RETRY_AFTER','asr_min_rms':'ASR_MIN_RMS',
                  'vosk_en':'VOSK_EN_PATH','vosk_zh':'VOSK_ZH_PATH','tts_backend':'TTS_BACKEND',
                  'tts_base':'TTS_BASE_URL','tts_key':'TTS_API_KEY','tts_model':'TTS_MODEL','tts_voice':'TTS_VOICE',
                  'voice_en':'TTS_VOICE_EN','voice_zh':'TTS_VOICE_ZH'}
-        return cls(**{k:os.environ[v] for k,v in mapping.items() if v in os.environ})
+        values={k:os.environ[v] for k,v in mapping.items() if v in os.environ}
+        for k in ('asr_timeout','asr_retry_after','asr_min_rms'):
+            if k in values: values[k]=float(values[k])
+        return cls(**values)
 
     def check_llm_url(self,url:str) -> str:
         return validate_llm_url(url)
 
-    async def chat(self,messages:list[dict],json_output:bool=False,llm:dict|None=None) -> str:
-        """llm 为学生自带配置 {base_url,model,api_key}；None 时用老师平台的模型。"""
+    async def chat(self,messages:list[dict],json_output:bool=False,llm:dict|None=None,timeout:float|None=None) -> str:
+        """llm 为学生自带配置 {base_url,model,api_key}；None 时用老师平台的模型。timeout 为整次调用上限（秒）。"""
         if llm:
             try: base=validate_llm_url(llm['base_url'])
             except ValueError as exc: raise ProviderError(str(exc)) from exc
@@ -106,8 +131,10 @@ class Providers:
             payload={'model':model,'messages':messages,'thinking':{'type':'disabled'},'max_tokens':900,'temperature':0.3,'stream':False}
         if json_output: payload['response_format']={'type':'json_object'}
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(45,connect=10),follow_redirects=False) as c:
-                r=await c.post(base.rstrip('/')+'/chat/completions',headers={'Authorization':'Bearer '+key},json=payload)
+            limit=timeout or 45
+            async with httpx.AsyncClient(timeout=httpx.Timeout(limit,connect=min(10,limit)),follow_redirects=False) as c:
+                # wait_for 限制整次调用（含慢速流式返回），保证保存测试在小程序超时之前返回。
+                r=await asyncio.wait_for(c.post(base.rstrip('/')+'/chat/completions',headers={'Authorization':'Bearer '+key},json=payload),limit)
                 if llm and r.status_code in (401,403): raise ProviderError('自带模型的密钥无效或无权限')
                 if llm and r.status_code==404: raise ProviderError('自带模型的接口地址或模型名不对')
                 if llm and r.status_code==429: raise ProviderError('自带模型额度不足或请求过快')
@@ -116,6 +143,8 @@ class Providers:
                 content=choice['message']['content']
                 if not isinstance(content,str) or not content.strip(): raise ProviderError('模型没有返回有效回答')
                 return content
+        except (asyncio.TimeoutError,httpx.TimeoutException) as exc:
+            raise ProviderError('自带模型响应太慢（超时）' if llm else '模型响应超时，请重试这一轮') from exc
         except (httpx.HTTPError,KeyError,ValueError,IndexError) as exc:
             raise ProviderError(('自带模型调用失败' if llm else '模型调用失败；请检查公共层模型名、接口地址和凭证')) from exc
 
@@ -124,11 +153,33 @@ class Providers:
         if self.asr_backend=='vosk':
             return await asyncio.to_thread(self._vosk,pcm,rate,language)
         if self.asr_backend!='http': raise ProviderError('ASR_BACKEND只能为vosk或http')
-        if not (self.asr_base and self.asr_key and self.asr_model): raise ProviderError('老师尚未配置兼容ASR服务')
+        if not (self.asr_base and self.asr_model): raise ProviderError('老师尚未配置兼容ASR服务')
+        # 云端模型对静音/持续噪声会编出 "Okay." 之类的句子；这类录音直接按“没听清”处理，不送识别、不降级。
+        if self.asr_min_rms>0 and not has_speech(pcm,self.asr_min_rms):
+            return {'text':'','confidence':None,'unclear':True,'provider':'gate'}
+        if self.asr_fallback=='vosk' and time.monotonic()<self._asr_down_until:
+            return await self._asr_fallback(pcm,rate,language)
+        try: return await self._http_asr(data,language)
+        except ProviderError:
+            if self.asr_fallback!='vosk': raise
+            self._asr_down_until=time.monotonic()+self.asr_retry_after
+            return await self._asr_fallback(pcm,rate,language)
+
+    async def _asr_fallback(self,pcm:bytes,rate:int,language:str) -> dict:
+        result=await asyncio.to_thread(self._vosk,pcm,rate,language)
+        return {**result,'provider':'vosk-fallback'}
+
+    def _asr_language(self,language:str) -> str:
+        names=dict(x.split(':',1) for x in self.asr_language_map.split(',') if ':' in x)
+        return names.get(language,language).strip()
+
+    async def _http_asr(self,data:bytes,language:str) -> dict:
+        headers={'Authorization':'Bearer '+self.asr_key} if self.asr_key else {}
         try:
-            async with httpx.AsyncClient(timeout=40) as c:
-                r=await c.post(self.asr_base.rstrip('/')+'/audio/transcriptions',headers={'Authorization':'Bearer '+self.asr_key},
-                               files={'file':('speech.wav',data,'audio/wav')},data={'model':self.asr_model,'language':language,'response_format':'json'})
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.asr_timeout,connect=min(3.0,self.asr_timeout)),trust_env=False) as c:
+                r=await c.post(self.asr_base.rstrip('/')+'/audio/transcriptions',headers=headers,
+                               files={'file':('speech.wav',data,'audio/wav')},
+                               data={'model':self.asr_model,'language':self._asr_language(language),'response_format':'json'})
                 r.raise_for_status();obj=r.json();text=obj.get('text','').strip()
                 # No confidence value is invented when the provider does not return one.
                 return {'text':text,'confidence':None,'unclear':not bool(text),'provider':'http'}

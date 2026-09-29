@@ -20,15 +20,24 @@ class LlmSettings(StrictModel):
     model: str = Field(min_length=1, max_length=100, pattern=r'^[A-Za-z0-9._:/@+-]+$')
     api_key: str | None = Field(default=None, max_length=400)
 
+class Evidence(StrictModel):
+    """一次练习的附加证据；可选，旧客户端不传也可以。"""
+    answer_valid: StrictBool = False
+    used_word: StrictBool = False
+    imitated: StrictBool = False
+
 class ProgressUpdate(StrictModel):
     word_id: str = Field(min_length=1, max_length=128)
     status: StrictInt | None = Field(default=None, ge=0, le=2)
     unclear: StrictBool = False
+    evidence: Evidence | None = None
 
     @model_validator(mode='after')
     def check_unclear(self):
         if self.unclear and self.status is not None:
             raise ValueError('没听清时 status 必须为 null，不得改变学习状态')
+        if self.unclear and self.evidence and any(self.evidence.model_dump().values()):
+            raise ValueError('没听清时不得记录回答证据')
         return self
 
 class ChatMessage(StrictModel):
@@ -52,4 +61,4 @@ class TurnInput(StrictModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     unclear: bool = False
     request_id: str = Field(min_length=8, max_length=128)
-    action: Literal['answer', 'start', 'stop', 'pause', 'resume', 'repeat', 'slow', 'help', 'tick'] = 'answer'
+    action: Literal['answer', 'start', 'stop', 'pause', 'resume', 'repeat', 'slow', 'help', 'tick', 'played'] = 'answer'

@@ -68,3 +68,30 @@ test('result page separates request failure from empty successful history', asyn
   await p.refresh();assert.equal(p.data.loaded,false);assert.equal(p.data.error,'连接失败');
   status=200;await p.refresh();assert.equal(p.data.loaded,true);assert.equal(p.data.error,'');assert.deepEqual(p.data.todayWords,[]);
 });
+test('unconfigured connection shows a setup hint and sends no request', async()=>{
+  const calls=[];
+  global.wx={getStorageSync:()=>({}),showToast:()=>{},request:o=>calls.push(o)};
+  const api=require('../miniprogram/utils/english-api.js');
+  const p=page('../miniprogram/pages/english-config/index.js');
+  p.data.connection={baseUrl:'',studentId:'',token:''};
+  // 模拟未放置 english-env.local.js 的全新副本
+  const orig=api.connection;api.connection=()=>({baseUrl:'',studentId:'',token:''});
+  try { await p.loadSaved(); } finally { api.connection=orig; }
+  assert.equal(calls.length,0);assert.equal(p.data.unconfigured,true);assert.equal(p.data.connectionOpen,true);
+  assert.equal(p.data.error,'');assert.equal(p.data.loading,false);
+});
+test('LLM save uses a longer request timeout than normal calls', async()=>{
+  const seen=[];
+  global.wx={getStorageSync:()=>connection,setStorageSync:()=>{},showToast:()=>{},request:o=>{seen.push(o);o.success({statusCode:200,data:{mode:'custom'}})}};
+  const api=require('../miniprogram/utils/english-api.js');
+  await api.progress();await api.saveLlm({base_url:'https://a.example',model:'m',api_key:'k'.repeat(10)});
+  assert.equal(seen[0].timeout,15000);assert.equal(seen[1].timeout,30000);
+});
+test('LLM settings sit after the save button and are collapsed by default', ()=>{
+  const fs=require('node:fs');
+  const wxml=fs.readFileSync(require.resolve('../miniprogram/pages/english-config/index.wxml'),'utf8');
+  assert.ok(wxml.indexOf('bindtap="onSave"')<wxml.indexOf('大模型（可选）'));
+  assert.match(wxml,/高级设置/);
+  const p=page('../miniprogram/pages/english-config/index.js');
+  assert.equal(p.data.advancedOpen,false);p.onToggleAdvanced();assert.equal(p.data.advancedOpen,true);
+});

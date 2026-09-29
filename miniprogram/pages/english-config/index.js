@@ -3,11 +3,11 @@ const origin = require('../../utils/english-origin')
 const DIFFICULTIES = ['basic', 'standard', 'challenge']
 Page({
   data: {
-    title: '为自己做一个英语练习工具', connection: {}, connectionOpen: false, ready: false, loading: false, saving: false, error: '',
+    title: '为自己做一个英语练习工具', connection: {}, connectionOpen: false, unconfigured: false, ready: false, loading: false, saving: false, error: '',
     form: { grade: 1, semester: 1, unit: 0, duration_minutes: 10, chinese_help: true, difficulty: 'basic', practice_words: 3 },
     grades: ['一年级', '二年级', '三年级', '四年级', '五年级', '六年级', '初一', '初二', '初三', '高一', '高二', '高三'], semesters: ['上学期', '下学期'],
     durations: [5, 10, 15, 20, 30], wordCounts: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], difficulties: ['起步：短问题，允许单词回答', '巩固：尝试简单完整句', '挑战：增加简短追问'],
-    llm: { mode: 'platform' }, llmForm: { base_url: '', model: '', api_key: '' }, llmBusy: false, llmError: '',
+    llm: { mode: 'platform' }, advancedOpen: false, llmForm: { base_url: '', model: '', api_key: '' }, llmBusy: false, llmError: '',
     groups: [], groupIndex: 0, durationIndex: 1, wordCountIndex: 2, difficultyIndex: 0, wordPreview: '', originHome: origin.home
   },
   onLoad() { this._generation = 0; this.setData({ connection: api.connection() }) },
@@ -16,7 +16,12 @@ Page({
   onUnload() { this._generation = (this._generation || 0) + 1 },
   async loadSaved() {
     const n = ++this._generation
-    this.setData({ loading: true, error: '', ready: false })
+    if (!api.isConfigured(api.connection())) {
+      // 还没有课堂连接：不发请求、不报错，直接引导填写。
+      this.setData({ unconfigured: true, connectionOpen: true, ready: false, loading: false, error: '' })
+      return
+    }
+    this.setData({ loading: true, error: '', ready: false, unconfigured: false })
     try {
       const form = await api.config()
       const catalog = await api.words(form)
@@ -89,6 +94,7 @@ Page({
     catch (e) { this.setData({ llmError: e.message }) }
     finally { this.setData({ llmBusy: false }) }
   },
+  onToggleAdvanced() { this.setData({ advancedOpen: !this.data.advancedOpen }) },
   onConnectionInput(e) { const field = e.currentTarget.dataset.field; if (['baseUrl', 'studentId', 'token'].includes(field)) this.setData({ [`connection.${field}`]: e.detail.value.trim() }) },
   onToggleConnection() { this.setData({ connectionOpen: !this.data.connectionOpen }) },
   onSaveConnection() {

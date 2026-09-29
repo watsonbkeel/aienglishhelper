@@ -34,3 +34,23 @@ test('request adds student id and credential header', async () => {
   assert.equal(observed.header.Authorization,'Bearer parent-token-very-long');
   assert.doesNotMatch(observed.url,/parent-token/);
 });
+test('tracked example connection file is empty and safe', () => {
+  const ex=require(base+'english-env.example.js');
+  assert.deepEqual(Object.keys(ex).sort(),['allowHttpForLan','baseUrl','studentId','token']);
+  assert.equal(ex.token,'');assert.equal(ex.baseUrl,'');assert.equal(ex.allowHttpForLan,false);
+});
+test('isConfigured distinguishes empty connection from filled one', () => {
+  global.wx={getStorageSync:()=>({})};
+  const api=require(base+'english-api.js');
+  assert.equal(api.isConfigured({baseUrl:'',studentId:'',token:''}),false);
+  assert.equal(api.isConfigured({baseUrl:'https://x.example',studentId:'s001',token:'t'.repeat(20)}),true);
+});
+test('report shows imitation separately from independent use', () => {
+  const v=require(base+'english-view.js');
+  const r=v.buildReport({today:'2026-09-29',words:[
+    {word_id:'a',status:1,last_practiced_date:'2026-09-29',unclear_count:0,valid_count:2,used_word_count:2,imitated_count:2},
+    {word_id:'b',status:2,last_practiced_date:'2026-09-29',unclear_count:0},
+  ]});
+  assert.equal(r.todayWords[0].evidenceText,'累计说出目标词 2 次，其中跟读/模仿 2 次（跟读不算会说）');
+  assert.equal(r.todayWords[1].evidenceText,'');
+});

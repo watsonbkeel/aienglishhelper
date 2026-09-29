@@ -125,3 +125,62 @@ def test_pi_playback_failure_is_not_silent(monkeypatch):
     edge=object.__new__(Edge);edge.audio_enabled=True;edge.playing=False;edge.player=None
     with pytest.raises(RuntimeError,match='播放'):
         edge.play(b'RIFF-test')
+
+
+# ---- 第1批：树莓派不丢答案、不拿旧答案判新题、播完上报 ----
+def _edge(monkeypatch):
+    from pi.english_voice import Edge
+    monkeypatch.setenv('BRAIN_URL','https://brain.example');monkeypatch.setenv('EDGE_TOKEN','edge-token-1234567890')
+    edge=Edge(play_audio=True,start_worker=False)
+    calls=[];state={'i':0}
+    def request(path,*,body=None,content=None,params=None,raw=False):
+        calls.append((path,body))
+        if path=='/voice/speech': return b'RIFF'
+        if body and body.get('action') in ('played','tick'): return {'active':True,'phase':'listen','session_id':'s','word_index':state['i'],'segments':[]}
+        if body and body.get('action')=='answer' and body.get('text')=='???':
+            return {'active':True,'phase':'listen','session_id':'s','word_index':state['i'],'segments':[{'text':'Again, please.','language':'en'}]}
+        if path=='/voice/audio' or (body and body.get('action')=='answer'): state['i']+=1
+        return {'active':True,'phase':'listen','session_id':'s','word_index':state['i'],'segments':[{'text':'banana.','language':'en'}]}
+    edge.request=request;edge.play=lambda wav:None;edge.local_message=lambda text:None
+    return edge,calls
+
+def test_pi_answer_while_busy_is_queued_not_dropped(monkeypatch):
+    edge,calls=_edge(monkeypatch)
+    edge.busy=True
+    assert edge.submit(wav=b'RIFF-answer') is True
+    assert edge.queue.qsize()==1
+
+def test_pi_tick_only_when_fully_idle(monkeypatch):
+    edge,calls=_edge(monkeypatch)
+    edge.active=True
+    edge.busy=True;assert edge.submit_tick() is False
+    edge.busy=False;edge.submit(wav=b'RIFF-answer');assert edge.submit_tick() is False
+    edge.queue.get_nowait();edge.queue.task_done()
+    edge.playing=True;assert edge.submit_tick() is False
+    edge.playing=False;assert edge.submit_tick() is True
+
+def test_pi_answer_recorded_before_new_prompt_is_discarded(monkeypatch):
+    edge,calls=_edge(monkeypatch)
+    edge.submit('start');edge.process(edge.queue.get_nowait());edge.queue.task_done()
+    edge.submit(wav=b'RIFF-old')
+    old=edge.queue.get_nowait();edge.queue.task_done()
+    # 自动重问（tick）不算换题，旧录音仍然有效
+    edge.process({'generation':edge.generation,'action':'tick','text':'','wav':None,'request_id':'tick-000001','spoken':edge.spoken})
+    assert old['spoken']==edge.spoken
+    # 没听清的重问不算换题，旧录音仍然有效
+    edge.process({'generation':edge.generation,'action':'answer','text':'???','wav':None,'request_id':'unclear-0001','spoken':edge.spoken})
+    assert old['spoken']==edge.spoken
+    # 另一个回答让机器人出了新题：之前录的答案不能拿去判新题
+    edge.process({'generation':edge.generation,'action':'answer','text':'苹果','wav':None,'request_id':'answer-00001','spoken':edge.spoken})
+    calls.clear()
+    edge.process(old)
+    assert not any(p=='/voice/audio' for p,_ in calls)
+    edge.submit(wav=b'RIFF-new');fresh=edge.queue.get_nowait();edge.queue.task_done()
+    edge.process(fresh)
+    assert any(p=='/voice/audio' for p,_ in calls)
+
+def test_pi_reports_playback_end_after_speaking(monkeypatch):
+    edge,calls=_edge(monkeypatch)
+    edge.submit('start');edge.process(edge.queue.get_nowait());edge.queue.task_done()
+    paths=[(p,(b or {}).get('action')) for p,b in calls]
+    assert paths[-2:]==[('/voice/speech',None),('/voice/turn','played')]

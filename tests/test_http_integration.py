@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from english_class.brain_api import create_brain
 from english_class.public_api import create_app
 from english_class.providers import Providers, pcm_wav, validate_wav
+from tests.test_providers import speech_like
 from english_class.client import PublicClient
 
 @contextlib.contextmanager
@@ -59,7 +60,7 @@ def test_real_http_lesson_config_audio_speech_and_progress(db):
                 start=turn(action='start');assert start['phase']=='listen'
                 speech=c.post(brain_url+'/voice/speech',headers=edge,json={'segments':start['segments']})
                 assert speech.status_code==200 and len(validate_wav(speech.content)[0])>0
-                wav=pcm_wav(b'\0'*6400);key=uuid.uuid4().hex
+                wav=speech_like();key=uuid.uuid4().hex  # 全静音会被静音拦截，按没听清处理
                 r=c.post(brain_url+'/voice/audio',headers=edge,params={'request_id':key},content=wav)
                 assert r.status_code==200 and r.json()['word_index']==1,r.text
                 repeat=c.post(brain_url+'/voice/audio',headers=edge,params={'request_id':key},content=wav)

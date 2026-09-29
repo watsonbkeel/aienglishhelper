@@ -7,12 +7,12 @@ class MemoryIO:
     def __init__(self):
         self.config_value={'grade':1,'semester':1,'unit':0,'duration_minutes':5,'chinese_help':True,'difficulty':'basic'}
         self.words_value=[{'word_id':'a','word':'apple','meaning':'苹果'}, {'word_id':'b','word':'banana','meaning':'香蕉'}, {'word_id':'c','word':'bag','meaning':'书包'}]
-        self.rows={};self.writes=[];self.chat_calls=[];self.fail=False
+        self.rows={};self.writes=[];self.evidence=[];self.chat_calls=[];self.fail=False
     async def config(self): return copy.deepcopy(self.config_value)
     async def words(self,cfg): return copy.deepcopy(self.words_value)
     async def progress(self): return {'today':'2026-09-29','words':list(self.rows.values())}
-    async def record(self,word_id,status,unclear,key):
-        self.writes.append((word_id,status,unclear,key))
+    async def record(self,word_id,status,unclear,key,evidence=None):
+        self.writes.append((word_id,status,unclear,key));self.evidence.append((word_id,status,evidence))
         r=self.rows.setdefault(word_id,{'word_id':word_id,'status':0,'unclear_count':0})
         r['status']=max(r['status'],status or 0);r['unclear_count']+=int(unclear)
         return dict(r)
@@ -306,3 +306,169 @@ async def test_llm_persona_follows_school_stage(grade,stage):
     system=io.chat_calls[-1][0]['content']
     assert stage in system
     if grade>6: assert 'elementary' not in system
+
+
+# ---- 第1批：控制词须听清；沉默计时从播放结束算起 ----
+@pytest.mark.asyncio
+async def test_unclear_control_phrase_does_not_restart_lesson():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    await t.turn('苹果',request_id='listen-000')
+    sid=t.session_id
+    r=await t.turn('开始练习',confidence=0.3,request_id='unclear-cmd-1')
+    assert t.index==1 and t.session_id==sid and r['phase']=='listen'
+    assert 'banana' in _say(r)
+    await t.turn('开始练习',unclear=True,request_id='unclear-cmd-2')
+    assert t.index==1 and t.session_id==sid
+    await t.turn('结束练习',confidence=0.2,request_id='unclear-cmd-3')
+    assert t.phase=='listen'
+    # 听清时控制词照常生效
+    await t.turn('开始练习',confidence=0.95,request_id='clear-cmd-1')
+    assert t.index==0 and t.session_id!=sid
+
+@pytest.mark.asyncio
+async def test_silence_counts_from_playback_end():
+    from english_class.engine import Tutor
+    io=MemoryIO();clock=[0.0];t=Tutor(io,clock=lambda:clock[0])
+    await t.turn('',action='start',request_id='start-00')
+    clock[0]=12;r=await t.turn('',action='played',request_id='played-001')  # 开场白播了12秒
+    assert r['segments']==[] and r['active']
+    clock[0]=25;assert (await t.turn('',action='tick',request_id='tick-0001'))['segments']==[]
+    clock[0]=33;assert 'apple' in _say(await t.turn('',action='tick',request_id='tick-0002'))
+    clock[0]=35;await t.turn('',action='played',request_id='played-002')
+    clock[0]=50;assert (await t.turn('',action='tick',request_id='tick-0003'))['segments']==[]
+    clock[0]=56;assert 'apple' in _say(await t.turn('',action='tick',request_id='tick-0004'))
+    assert io.writes==[]
+
+@pytest.mark.asyncio
+async def test_played_event_is_not_child_activity_and_is_harmless_when_idle():
+    from english_class.engine import Tutor
+    io=MemoryIO();clock=[0.0];t=Tutor(io,clock=lambda:clock[0])
+    assert (await t.turn('',action='played',request_id='played-000'))['segments']==[]
+    await t.turn('',action='start',request_id='start-00')
+    for i,s in enumerate(range(20,181,20)):
+        clock[0]=s;await t.turn('',action='played',request_id=f'played-{i:03}')
+    clock[0]=181;r=await t.turn('',action='tick',request_id='tick-0001')
+    assert not r['active'] and '休息' in _say(r)
+
+
+# ---- 第2批：选词 2复习+1新、7天复查、词形、判题带题面 ----
+def _rows(**kw):
+    return {k:{'word_id':k,'status':s,'unclear_count':0,'last_practiced_date':d} for k,(s,d) in kw.items()}
+
+def _six(io):
+    io.words_value=[{'word_id':k,'word':'w'+k,'meaning':'义'+k} for k in ('n1','r1','r2','n2','m1','m2')]
+
+@pytest.mark.asyncio
+async def test_selection_two_review_one_new():
+    from english_class.engine import Tutor
+    io=MemoryIO();_six(io)
+    io.rows=_rows(r1=(1,'2026-09-27'),r2=(0,'2026-09-20'),m1=(2,'2026-09-28'),m2=(2,'2026-09-29'))
+    t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    ids=[w['word_id'] for w in t.words]
+    assert sorted(ids)==['n1','r1','r2'] and ids.index('r2')<ids.index('r1')
+
+@pytest.mark.asyncio
+async def test_selection_rechecks_one_mastered_word_after_7_days():
+    from english_class.engine import Tutor
+    io=MemoryIO();_six(io)
+    io.rows=_rows(r1=(1,'2026-09-27'),r2=(0,'2026-09-20'),m1=(2,'2026-09-21'),m2=(2,'2026-09-01'))
+    t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    ids=[w['word_id'] for w in t.words]
+    assert len(ids)==3 and 'n1' in ids and sum(i in ('m1','m2') for i in ids)==1 and 'm2' in ids
+
+@pytest.mark.asyncio
+async def test_selection_fresh_student_gets_new_words_in_order():
+    from english_class.engine import Tutor
+    io=MemoryIO();_six(io);t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    assert [w['word_id'] for w in t.words]==['n1','r1','r2']
+
+def test_inflected_forms_count_as_target_word():
+    from english_class.engine import mentions_word
+    for text,word in [('I like apples','apple'),('two boxes','box'),('many cities','city'),('I played','play'),
+                      ('she is running','run'),('I went home','go'),('he has a cat','have'),('I liked it','like'),
+                      ('three children','child'),('making a cake','make')]:
+        assert mentions_word(text,word),(text,word)
+    assert not mentions_word('pineapple','apple') and not mentions_word('I like bananas','apple')
+    assert mentions_word('get up early','get up') and not mentions_word('get it','get up')
+
+@pytest.mark.asyncio
+async def test_judge_receives_the_question_actually_asked():
+    from english_class.engine import Tutor
+    io=MemoryIO();io.config_value['chinese_help']=False;t=Tutor(io)
+    await t.turn('',action='start',request_id='start-00')
+    t.phase='recall';t.index=0;await t.prompt()
+    await t.turn('apple',request_id='recall-000')
+    judge=[c for c in io.chat_calls if 'VOCABULARY_JUDGE' in c[0]['content']][-1]
+    assert json.loads(judge[-1]['content'])['question']=='Which fruit is often red?'
+
+
+# ---- 第2批：记录拆分“回答有效/用了目标词/模仿”；跟读核对目标词 ----
+@pytest.mark.asyncio
+async def test_repeat_phase_checks_target_word_retries_once_then_skips():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    for i,a in enumerate(['苹果','香蕉','书包']): await t.turn(a,request_id=f'listen-{i}')
+    await t.turn('',action='help',request_id='help-001')
+    r=await t.turn('banana',request_id='echo-wrong-1')
+    assert t.phase=='repeat' and t.index==0 and 'apple' in _say(r)
+    r=await t.turn('hello',request_id='echo-wrong-2')
+    assert t.phase=='recall' and t.index==1
+    assert io.rows['a']['status']==1
+    assert io.evidence[-1]==('a',None,{'answer_valid':False,'used_word':False,'imitated':True})
+
+@pytest.mark.asyncio
+async def test_repeat_phase_correct_echo_is_imitation_not_upgrade():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    for i,a in enumerate(['苹果','香蕉','书包']): await t.turn(a,request_id=f'listen-{i}')
+    await t.turn('',action='help',request_id='help-001')
+    await t.turn('apples',request_id='echo-ok-1')
+    assert io.rows['a']['status']==1 and t.index==1
+    assert io.evidence[-1]==('a',None,{'answer_valid':True,'used_word':True,'imitated':True})
+
+@pytest.mark.asyncio
+async def test_recall_records_evidence_fields():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    for i,a in enumerate(['苹果','香蕉','书包']): await t.turn(a,request_id=f'listen-{i}')
+    await t.turn('apple',request_id='recall-0')
+    assert io.evidence[-1]==('a',2,{'answer_valid':True,'used_word':True,'imitated':False})
+    await t.turn('orange',request_id='recall-1')
+    assert io.evidence[-1]==('b',None,{'answer_valid':False,'used_word':False,'imitated':False})
+
+@pytest.mark.asyncio
+async def test_dialog_question_mentioning_word_is_not_a_demonstration():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    t.phase='dialog';t.known={'a':1,'b':1,'c':1}
+    t.result([{'text':'Do you like apples?','language':'en'}])
+    assert t.last_demonstrated==set()
+    await t.turn('Yes, I like apples.',request_id='dialog-01')
+    assert io.rows['a']['status']==2
+    assert io.evidence[-1]==('a',2,{'answer_valid':True,'used_word':True,'imitated':False})
+
+@pytest.mark.asyncio
+async def test_dialog_explicit_model_answer_counts_as_imitation():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    t.phase='dialog';t.known={'a':1,'b':1,'c':1}
+    for text in ('You can say "apple".','Try saying: I like apples.','Repeat after me: apple.','你可以说 apple。'):
+        t.result([{'text':text,'language':'en'}]);assert t.last_demonstrated=={'a'},text
+    await t.turn('apple',request_id='dialog-01')
+    assert io.rows['a']['status']<2
+    assert io.evidence[-1]==('a',None,{'answer_valid':True,'used_word':True,'imitated':True})
+
+@pytest.mark.asyncio
+async def test_dialog_llm_can_flag_modelled_words():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    t.phase='dialog';t.known={'a':1,'b':1,'c':1}
+    orig=io.chat
+    async def chat(messages,json_output=True):
+        if 'speaking partner' in messages[0]['content']:
+            return json.dumps({'reply':[{'text':'Bananas are yellow. What fruit do you like?','language':'en'}],'relevant':True,'modelled':['banana']})
+        return await orig(messages,json_output)
+    io.chat=chat
+    await t.turn('I like apples',request_id='dialog-01')
+    assert t.last_demonstrated=={'b'}

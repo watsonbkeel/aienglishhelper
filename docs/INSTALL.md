@@ -135,6 +135,26 @@ ASR_MODEL=该服务实际转写模型ID
 ASR_API_KEY=仅在服务器填写
 ```
 
+**当前线上配置（2026-09-29）**：英文和中文识别都走香港 GPU 服务器上的 Qwen3-ASR（`http://<香港ASR的Tailscale地址>:3102/v1`，仅 Tailscale 内网，无公网），每句约 0.2 秒；本机 Vosk 小模型只做兜底。
+
+```ini
+ASR_BACKEND=http
+ASR_BASE_URL=http://<香港ASR的Tailscale地址>:3102/v1
+ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+ASR_API_KEY=
+ASR_LANGUAGE_MAP=en:English,zh:Chinese
+ASR_FALLBACK=vosk
+ASR_TIMEOUT=3
+ASR_RETRY_AFTER=60
+ASR_MIN_RMS=200
+VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
+```
+
+- 该服务的 language 必须是 `English`/`Chinese`，传 `en`/`zh` 会返回 502，所以要配 `ASR_LANGUAGE_MAP`。
+- 云端模型对静音、持续噪声会编出 "Okay." "I'm sorry."；`ASR_MIN_RMS` 先判断有没有人声，没有就按"没听清"处理（不降级、不送云端）。
+- 云端失败或超过 `ASR_TIMEOUT` 秒，本轮改用本机 Vosk，之后 `ASR_RETRY_AFTER` 秒内直接走本机，不让每轮都等超时。
+- 服务不需要密钥时 `ASR_API_KEY` 留空即可。学生录音会传到香港服务器转文字。
+
 该模式要求服务支持 `POST /audio/transcriptions`，multipart 上传 WAV，返回包含 `text` 的 JSON。不要把 DeepSeek 文本对话接口填到 ASR 地址，它并不是本适配器的录音转写接口。没有返回置信度的服务会保留 `confidence=null`，程序不伪造识别分数。
 
 ### 4.3 语音合成
@@ -312,6 +332,10 @@ english-class-assistant/miniprogram/utils/english-env.local.js
 配置小程序后台 `request` 合法域名为你的公共 HTTPS 域名。在正式手机网络条件下测试，不把开发者工具中临时关闭域名校验当成最终部署办法。
 
 首次打开配置页会读取公共服务。也可以展开页面底部的「课堂连接设置」，输入公共服务根地址、学生 ID 和家长课堂凭证。地址只填根地址，不加 `/api/config`，也不填 `/students/s001`。
+
+没有 `english-env.local.js` 时，小程序会读取仓库自带的 `utils/english-env.example.js`（全部为空），配置页显示「还没有连接课堂」提示并自动展开课堂连接设置，不会发出请求；测试和构建也不依赖本地文件。
+
+自带大模型放在配置页最下方「高级设置」里，默认收起，单独保存；换接口地址时必须重新填写 API Key，保存前会按课程判题格式做一次 20 秒内的测试调用。
 
 页面会把手动填写的连接保存在本地。之后更换 `english-env.local.js` 但页面仍连接旧账号时，修改课堂连接设置，或在开发者工具清除该小程序缓存。
 

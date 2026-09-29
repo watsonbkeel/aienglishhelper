@@ -36,7 +36,7 @@ def load_env(path:Path):
         os.environ[k.strip()]=v
 
 class Edge:
-    def __init__(self,play_audio=True):
+    def __init__(self,play_audio=True,start_worker=True):
         self.url=os.environ.get('BRAIN_URL','').rstrip('/');self.token=os.environ.get('EDGE_TOKEN','')
         if not self.url or len(self.token)<16: raise ValueError('请填写BRAIN_URL和本人的EDGE_TOKEN')
         p=urlsplit(self.url)
@@ -46,9 +46,11 @@ class Edge:
         self.headers={'Authorization':'Bearer '+self.token}
         self.audio_enabled=play_audio;self.active=False;self.busy=False;self.playing=False
         self.phase='idle';self.player=None;self.generation=0;self.last_activity=time.monotonic()
+        # spoken：机器人每出一道新题（回答/控制后的回复）加1；录音时记下，处理时若已换题则作废。
+        self.spoken=0;self.question_key=None
         self.queue=queue.Queue(maxsize=4);self.stop_event=threading.Event();self.last_result=None
         self.thread=threading.Thread(target=self.worker,name='english-network',daemon=True)
-        self.thread.start()
+        if start_worker: self.thread.start()
 
     def request(self,path,*,body=None,content=None,params=None,raw=False):
         headers=dict(self.headers)
@@ -67,10 +69,16 @@ class Edge:
             while True:
                 try: self.queue.get_nowait();self.queue.task_done()
                 except queue.Empty: break
-        if self.busy and action not in ('stop','pause'): return False
-        item={'generation':self.generation,'action':action,'text':text,'wav':wav,'request_id':uuid.uuid4().hex}
+        # 忙时不再丢弃孩子的回答：排队等上一轮完成后处理。
+        item={'generation':self.generation,'action':action,'text':text,'wav':wav,'request_id':uuid.uuid4().hex,'spoken':self.spoken}
         try: self.queue.put_nowait(item);return True
-        except queue.Full: return False
+        except queue.Full:
+            LOG.warning('待处理的语音太多，这一句没有发送');return False
+
+    def submit_tick(self):
+        """只在完全空闲时轮询：不忙、不在播放、队列里没有待处理的回答。"""
+        if not self.active or self.busy or self.playing or not self.queue.empty(): return False
+        return self.submit('tick')
 
     def stop_audio(self):
         player=self.player
@@ -106,27 +114,48 @@ class Edge:
         while not self.stop_event.is_set():
             try: item=self.queue.get(timeout=0.3)
             except queue.Empty: continue
-            self.busy=True;received=False
-            try:
-                if item['wav'] is not None:
-                    result=self.request('/voice/audio',content=item['wav'],params={'request_id':item['request_id']})
-                else:
-                    result=self.request('/voice/turn',body={k:item[k] for k in ('action','text','request_id')})
-                received=True
-                self.active=result['active'];self.phase=result['phase'];self.last_result=result
-                segments=result.get('segments',[])
-                if item['generation']!=self.generation: continue
-                if segments:
-                    LOG.info('机器人：%s',' '.join(s['text'] for s in segments))
-                    if self.audio_enabled:
-                        audio=self.request('/voice/speech',body={'segments':segments,'slow':result.get('slow',False)},raw=True)
-                        if item['generation']==self.generation: self.play(audio)
-            except Exception as exc:
-                LOG.error('%s',exc)
-                if item['generation']==self.generation:
-                    self.local_message('播报暂时没有完成。请说，再说一次，听当前题目。' if received else '连接暂时有问题。请检查服务后再继续。')
-            finally:
-                self.busy=False;self.last_activity=time.monotonic();self.queue.task_done()
+            try: self.process(item)
+            finally: self.queue.task_done()
+
+    def process(self,item):
+        if item['action']=='answer' and item.get('spoken',self.spoken)!=self.spoken:
+            # 这句是在上一题时录的，机器人已经换了新题；不拿它判新题。
+            LOG.info('丢弃换题前录下的一句回答');return
+        self.busy=True;received=False
+        try:
+            if item['wav'] is not None:
+                result=self.request('/voice/audio',content=item['wav'],params={'request_id':item['request_id']})
+            else:
+                result=self.request('/voice/turn',body={k:item[k] for k in ('action','text','request_id')})
+            received=True
+            self.active=result['active'];self.phase=result['phase'];self.last_result=result
+            segments=result.get('segments',[])
+            if item['action'] not in ('tick','played'): self.note_question(result)
+            if item['generation']!=self.generation: return
+            if segments:
+                LOG.info('机器人：%s',' '.join(s['text'] for s in segments))
+                if self.audio_enabled:
+                    audio=self.request('/voice/speech',body={'segments':segments,'slow':result.get('slow',False)},raw=True)
+                    if item['generation']==self.generation: self.play(audio)
+                if self.active: self.report_played()
+        except Exception as exc:
+            LOG.error('%s',exc)
+            if item['generation']==self.generation:
+                self.local_message('播报暂时没有完成。请说，再说一次，听当前题目。' if received else '连接暂时有问题。请检查服务后再继续。')
+        finally:
+            self.busy=False;self.last_activity=time.monotonic()
+
+    def note_question(self,result):
+        """题目位置变了（开始/换词/换阶段/对话下一轮）才算换题；“没听清再说一次”不算。"""
+        key=(result.get('session_id'),result.get('phase'),result.get('word_index'))
+        if key!=self.question_key or (result.get('phase')=='dialog' and result.get('segments')):
+            self.spoken+=1
+        self.question_key=key
+
+    def report_played(self):
+        """告诉脑端“刚播完”，20秒重问从播完开始算；失败只记日志，不打断上课。"""
+        try: self.request('/voice/turn',body={'action':'played','text':'','request_id':uuid.uuid4().hex})
+        except Exception as exc: LOG.warning('播完通知失败：%s',exc)
 
     def close(self):
         self.stop_event.set();self.stop_audio()
@@ -187,11 +216,10 @@ def voice_loop(edge):
                     if not edge.active: edge.submit('start')
                     else: edge.generation+=1;edge.stop_audio()
                 elif action: edge.submit(action)
-                elif edge.active and edge.phase!='paused' and not edge.busy: edge.submit(wav=wav)
+                elif edge.active and edge.phase!='paused': edge.submit(wav=wav)
                 # Idle environmental speech is never sent to the server.
             # 5 秒轮询一次，脑端据此判断 20 秒重问、3 分钟自动暂停（服务器决定，这里不计时）。
-            if edge.active and not edge.busy and not edge.playing and now-last_tick>TICK_SECONDS:
-                edge.submit('tick');last_tick=now
+            if now-last_tick>TICK_SECONDS and edge.submit_tick(): last_tick=now
     finally:
         proc.terminate()
         try: proc.wait(timeout=3)
