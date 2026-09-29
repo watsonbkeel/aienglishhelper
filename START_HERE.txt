@@ -1,0 +1,11 @@
+英语听说陪练课程项目 v0.1.0
+
+1. 先打开 docs/INSTALL.html（浏览器阅读）或 docs/INSTALL.md。
+2. 服务器安装公共层，填老师的模型配置，再创建第一个学生 s001。
+3. 先用文字调试跑通，确认真实模型和进度工作，再接树莓派耳麦。
+4. 将创建学生时生成的 english-env.local.js 放到 miniprogram/utils/，导入 miniprogram 目录测试。
+5. 原背词小程序合并：使用 scripts/build_miniprogram.py，不覆盖你的原项目。
+
+当前包是完整的课程扩展源码。完整原词库首次安装从你的 WordMaster_SZ 仓库读取；也可直接提供本地 fullDictionary.js。
+没有重新编造词库；页面的“练习组”不是教材单元。
+真实供应商接口、儿童声音、树莓派USB耳麦和微信手机预览仍需实测。

@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+*.sqlite*
+var/
+output/
+data/dictionary.json
+data/fullDictionary.js
+sources/
+miniprogram/utils/english-env.local.js
+
+# macOS
+.DS_Store
+
+# WorkBuddy local data
+.workbuddy/
+
+# WeChat miniprogram private config
+miniprogram/project.private.config.json

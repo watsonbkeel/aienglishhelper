@@ -1,0 +1,20 @@
+<view class="page">
+  <view class="eyebrow">我的课程作品 · 真实练习记录</view>
+  <view class="title">今天的练习</view>
+  <view class="date" wx:if="{{loaded}}">{{today}} · 日期以课堂服务器为准</view>
+  <view class="error" wx:if="{{error}}">暂时没有读到记录。{{error}}</view>
+  <view class="empty" wx:if="{{loading}}">正在读取记录…</view>
+  <block wx:if="{{loaded && !error}}">
+    <view class="summary"><view class="number">{{todayWords.length}}<text> 个词</text></view><view class="note">今天实际练过</view><view class="line">当前会说 {{speakingCount}} 个 · 听懂 {{listeningCount}} 个 · 继续练习 {{practicingCount}} 个</view></view>
+    <view class="empty" wx:if="{{!todayWords.length}}">今天还没有开始练习。对机器人说“开始今天的英语练习”吧。</view>
+    <view class="word-card" wx:for="{{todayWords}}" wx:key="word_id">
+      <view class="word-top"><view class="word">{{item.word}}</view><view class="badge state-{{item.status}}">{{item.stateText}}</view></view>
+      <view class="meaning">{{item.meaning}}</view><view class="unclear" wx:if="{{item.unclear_count}}">{{item.unclearText}}。这不是答错次数。</view>
+    </view>
+    <view class="note footnote">“会说了”是当前记录，不表示今天首次掌握或永远不会忘。跟读不会自动记成独立会说；系统没听清不会降低状态。</view>
+    <view class="link" bindtap="onToggleAll">{{showAll ? '收起' : '查看'}}全部已练记录（{{allWords.length}}）</view>
+    <view class="history" wx:if="{{showAll}}"><view class="history-row" wx:for="{{allWords}}" wx:key="word_id"><view>{{item.word}} · {{item.stateText}}</view><view class="note">最近练习 {{item.last_practiced_date}}</view></view></view>
+  </block>
+  <button class="primary" bindtap="refresh" loading="{{loading}}" disabled="{{loading}}">刷新记录</button>
+  <button class="secondary" bindtap="onConfig">返回练习设置</button>
+</view>

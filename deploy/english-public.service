@@ -1,0 +1,26 @@
+[Unit]
+Description=English class shared vocabulary, configuration, progress and providers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=english-public
+Group=english-public
+WorkingDirectory=/opt/english-class
+EnvironmentFile=/etc/english-class/public.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/english-class/.venv/bin/python -m english_class.run public
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/english-class
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=aibot English course microphone and playback addon
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=english-edge
+Group=english-edge
+SupplementaryGroups=audio
+WorkingDirectory=/opt/english-class-edge
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/english-class-edge/.venv/bin/python -m pi.english_voice --env /etc/english-class/pi.env
+Restart=on-failure
+RestartSec=4
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

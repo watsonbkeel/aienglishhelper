@@ -1,0 +1,20 @@
+# 放入你已配置好有效HTTPS证书的server块中。
+# 不覆盖整台机器nginx配置，不创建假域名，不自动申请证书。
+# 微信后台request合法域名填写该HTTPS域名（不带路径）。
+client_max_body_size 2m;
+
+location /api/ {
+    proxy_pass http://127.0.0.1:18090;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 120s;
+}
+# 每个学生一个显式映射。9101是s001；其他学生复制并修改ID/端口。
+location /students/s001/ {
+    proxy_pass http://127.0.0.1:9101/;
+    proxy_set_header Host $host;
+    proxy_read_timeout 180s;
+    proxy_send_timeout 180s;
+}
+# 公共provider接口不可通过反向代理对外暴露。
+location /internal/ { return 404; }

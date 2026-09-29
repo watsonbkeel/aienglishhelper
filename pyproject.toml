@@ -1,0 +1,9 @@
+[project]
+name = "wordmaster-english-class"
+version = "0.1.0"
+description = "aibot + WordMaster SZ elementary English course project"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

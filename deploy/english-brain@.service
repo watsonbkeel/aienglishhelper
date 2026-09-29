@@ -1,0 +1,28 @@
+[Unit]
+Description=English class student brain %i
+After=network-online.target english-public.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=english-%i
+Group=english-%i
+WorkingDirectory=/opt/english-class/students/%i
+EnvironmentFile=/etc/english-class/students/%i.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/english-class/.venv/bin/python -m english_class.run brain
+Restart=on-failure
+RestartSec=3
+UMask=0077
+# 断点续学文件：/var/lib/english-class-brain/%i/resume.json（ProtectSystem=strict 下唯一可写目录）
+StateDirectory=english-class-brain/%i
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

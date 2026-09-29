@@ -1,0 +1,14 @@
+{
+  "aibot": {
+    "repository": "watsonbkeel/aibot",
+    "commit": "cd5b34c446d5134c6346f290f7513380edba84a5"
+  },
+  "WordMaster_SZ": {
+    "repository": "watsonbkeel/WordMaster_SZ",
+    "commit": "4701d5bc72097c8851b180bf6025fb8b9db12ae4",
+    "dictionary_path": "utils/fullDictionary.js",
+    "dictionary_git_blob": "ea9b65ea1c1ae6e4b871bbd27f8d46796097d8cc"
+  },
+  "bundled_upstream_sources": false,
+  "dictionary_import": "first-install download with blob verification or user supplied local source"
+}

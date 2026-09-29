@@ -1,0 +1,60 @@
+.........................................                                [100%]
+41 passed in 1.57s
+TAP version 13
+# Subtest: progress 0 practiced is not never practiced
+ok 1 - progress 0 practiced is not never practiced
+  ---
+  duration_ms: 1.128334
+  type: 'test'
+  ...
+# Subtest: today filter and cumulative labels
+ok 2 - today filter and cumulative labels
+  ---
+  duration_ms: 0.243445
+  type: 'test'
+  ...
+# Subtest: connection refuses provider placeholders and mismatched base
+ok 3 - connection refuses provider placeholders and mismatched base
+  ---
+  duration_ms: 0.454012
+  type: 'test'
+  ...
+# Subtest: request failure is rejected, not empty report
+ok 4 - request failure is rejected, not empty report
+  ---
+  duration_ms: 1.156627
+  type: 'test'
+  ...
+# Subtest: request adds student id and credential header
+ok 5 - request adds student id and credential header
+  ---
+  duration_ms: 0.284798
+  type: 'test'
+  ...
+# Subtest: configuration page loads actual values and only toasts after save
+ok 6 - configuration page loads actual values and only toasts after save
+  ---
+  duration_ms: 3.170541
+  type: 'test'
+  ...
+# Subtest: failed configuration save never shows success
+ok 7 - failed configuration save never shows success
+  ---
+  duration_ms: 2.136188
+  type: 'test'
+  ...
+# Subtest: result page separates request failure from empty successful history
+ok 8 - result page separates request failure from empty successful history
+  ---
+  duration_ms: 1.779582
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 54.237269

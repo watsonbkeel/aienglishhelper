@@ -1,0 +1,6 @@
+{
+  "pages": ["pages/english-config/index", "pages/english-result/index"],
+  "window": {"navigationBarTitleText": "我的英语陪练", "navigationBarBackgroundColor": "#F5F7FB", "navigationBarTextStyle": "black", "backgroundColor": "#F5F7FB"},
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}
