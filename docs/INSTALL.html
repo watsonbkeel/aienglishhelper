@@ -121,7 +121,23 @@ ASR_BASE_URL=https://你的语音服务实际API根地址/v1
 ASR_MODEL=该服务实际转写模型ID
 ASR_API_KEY=仅在服务器填写
 </code></pre>
-<p><strong>当前线上配置（2026-09-29）</strong>：英文和中文识别都走香港 GPU 服务器上的 Qwen3-ASR（<code>http://&lt;香港ASR的Tailscale地址&gt;:3102/v1</code>，仅 Tailscale 内网，无公网），每句约 0.2 秒；本机 Vosk 小模型只做兜底。</p>
+<p><strong>当前线上配置（2026-09-30 起）</strong>：香港 GPU 服务器网络故障，改用腾讯云一句话识别（<code>SentenceRecognition</code>，英文引擎 <code>16k_en</code>、中文 <code>16k_zh</code>），课程服务器实测每句 0.11–0.16 秒，8 个测试词句全对；本机 Vosk 小模型只做兜底。</p>
+<pre><code class="language-ini">ASR_BACKEND=tencent
+TENCENT_SECRET_ID=AKID…（仅在服务器填写）
+TENCENT_SECRET_KEY=仅在服务器填写
+ASR_FALLBACK=vosk
+ASR_TIMEOUT=3
+ASR_RETRY_AFTER=60
+ASR_MIN_RMS=200
+VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
+</code></pre>
+<ul>
+<li>需要在腾讯云控制台开通「语音识别」；按调用量计费（有每月免费额度，超出后付费或购买资源包），欠费或额度耗尽时本轮自动改用本机 Vosk。</li>
+<li>建议用只授权语音识别（QcloudASRFullAccess）的子账号密钥，不用主账号密钥。</li>
+<li>静音/噪声仍先经 <code>ASR_MIN_RMS</code> 拦截，不送腾讯云、不计费。学生录音会传到腾讯云转文字。</li>
+<li>香港 Qwen3-ASR 恢复后想切回：<code>ASR_BACKEND=http</code>，其余配置保留原值即可。</li>
+</ul>
+<p><strong>此前配置（2026-09-29）</strong>：英文和中文识别都走香港 GPU 服务器上的 Qwen3-ASR（<code>http://&lt;香港ASR的Tailscale地址&gt;:3102/v1</code>，仅 Tailscale 内网，无公网），每句约 0.2 秒；本机 Vosk 小模型只做兜底。</p>
 <pre><code class="language-ini">ASR_BACKEND=http
 ASR_BASE_URL=http://&lt;香港ASR的Tailscale地址&gt;:3102/v1
 ASR_MODEL=Qwen/Qwen3-ASR-1.7B

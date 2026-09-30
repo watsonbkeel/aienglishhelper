@@ -63,7 +63,7 @@ status0/1/2/null；保存历史最大档。unclear=true必须status=null，增�
 
 `POST /internal/chat`、`/internal/asr?language=en|zh`、`/internal/tts` 需要brain角色和自己的student_id。仅服务器本机访问，不在Nginx中公开。
 
-模型入参messages与json_output；有学生自带模型时先调它，调用失败或json_output时返回非JSON，就记录last_status=fallback与错误原因并改用平台模型；响应含`provider`（custom/platform）。ASR输入原始16kHz单声道16位PCM WAV，返回text/confidence/null/unclear/provider；provider为vosk、http、gate（静音或噪声被拦截，text为空、unclear=true）或vosk-fallback（云端失败改用本机）；TTS输入segments[{text,language}]和slow，输出WAV。真供应商密钥只在公共服务。
+模型入参messages与json_output；有学生自带模型时先调它，调用失败或json_output时返回非JSON，就记录last_status=fallback与错误原因并改用平台模型；响应含`provider`（custom/platform）。ASR输入原始16kHz单声道16位PCM WAV，返回text/confidence/null/unclear/provider；provider为vosk、http、tencent（腾讯云一句话识别）、gate（静音或噪声被拦截，text为空、unclear=true）或vosk-fallback（云端失败改用本机）；TTS输入segments[{text,language}]和slow，输出WAV。真供应商密钥只在公共服务。
 
 ## 树莓派到本人脑端
 

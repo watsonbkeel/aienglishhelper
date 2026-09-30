@@ -2,6 +2,9 @@
 from __future__ import annotations
 import array
 import asyncio
+import base64
+import hashlib
+import hmac
 import io
 import ipaddress
 import json
@@ -13,6 +16,7 @@ import tempfile
 import time
 import wave
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
@@ -69,6 +73,23 @@ def has_speech(pcm:bytes,min_rms:float,rate:int=16000) -> bool:
     return loud>=min_rms and loud>=2*max(floor,1.0)
 
 
+TENCENT_ASR_HOST='asr.tencentcloudapi.com'
+TENCENT_ASR_ENGINES={'en':'16k_en','zh':'16k_zh'}
+
+
+def tc3_authorization(secret_id:str,secret_key:str,service:str,host:str,body:bytes,timestamp:int) -> str:
+    """腾讯云 API 3.0 TC3-HMAC-SHA256 签名（POST，签 content-type 与 host）。"""
+    date=datetime.fromtimestamp(timestamp,timezone.utc).strftime('%Y-%m-%d')
+    canonical='\n'.join(['POST','/','',f'content-type:application/json; charset=utf-8\nhost:{host}\n',
+                         'content-type;host',hashlib.sha256(body).hexdigest()])
+    scope=f'{date}/{service}/tc3_request'
+    to_sign='\n'.join(['TC3-HMAC-SHA256',str(timestamp),scope,hashlib.sha256(canonical.encode()).hexdigest()])
+    def sign(key:bytes,msg:str) -> bytes: return hmac.new(key,msg.encode(),hashlib.sha256).digest()
+    k=sign(sign(sign(('TC3'+secret_key).encode(),date),service),'tc3_request')
+    signature=hmac.new(k,to_sign.encode(),hashlib.sha256).hexdigest()
+    return f'TC3-HMAC-SHA256 Credential={secret_id}/{scope}, SignedHeaders=content-type;host, Signature={signature}'
+
+
 def pcm_wav(pcm:bytes,rate:int=16000) -> bytes:
     out=io.BytesIO()
     with wave.open(out,'wb') as w:
@@ -88,7 +109,9 @@ class Providers:
     asr_fallback:str=''              # vosk：云端失败/超时改用本机 Vosk
     asr_timeout:float=8.0
     asr_retry_after:float=60.0       # 云端失败后这段时间直接走本机，不让每轮都等超时
-    asr_min_rms:float=200.0          # 仅 http 模式：低于此音量或没有起伏的录音按“没听清”处理；0 关闭
+    tencent_secret_id:str=field(default='',repr=False)   # asr_backend=tencent：腾讯云一句话识别
+    tencent_secret_key:str=field(default='',repr=False)
+    asr_min_rms:float=200.0          # 云端模式（http/tencent）：低于此音量或没有起伏的录音按“没听清”处理；0 关闭
     vosk_en:str='models/vosk-model-small-en-us-0.15'
     vosk_zh:str='models/vosk-model-small-cn-0.22'
     tts_backend:str='edge'
@@ -107,6 +130,7 @@ class Providers:
                  'asr_backend':'ASR_BACKEND','asr_base':'ASR_BASE_URL','asr_key':'ASR_API_KEY','asr_model':'ASR_MODEL',
                  'asr_language_map':'ASR_LANGUAGE_MAP','asr_fallback':'ASR_FALLBACK','asr_timeout':'ASR_TIMEOUT',
                  'asr_retry_after':'ASR_RETRY_AFTER','asr_min_rms':'ASR_MIN_RMS',
+                 'tencent_secret_id':'TENCENT_SECRET_ID','tencent_secret_key':'TENCENT_SECRET_KEY',
                  'vosk_en':'VOSK_EN_PATH','vosk_zh':'VOSK_ZH_PATH','tts_backend':'TTS_BACKEND',
                  'tts_base':'TTS_BASE_URL','tts_key':'TTS_API_KEY','tts_model':'TTS_MODEL','tts_voice':'TTS_VOICE',
                  'voice_en':'TTS_VOICE_EN','voice_zh':'TTS_VOICE_ZH'}
@@ -152,14 +176,16 @@ class Providers:
         pcm,rate=validate_wav(data)
         if self.asr_backend=='vosk':
             return await asyncio.to_thread(self._vosk,pcm,rate,language)
-        if self.asr_backend!='http': raise ProviderError('ASR_BACKEND只能为vosk或http')
-        if not (self.asr_base and self.asr_model): raise ProviderError('老师尚未配置兼容ASR服务')
+        if self.asr_backend not in ('http','tencent'): raise ProviderError('ASR_BACKEND只能为vosk、http或tencent')
+        if self.asr_backend=='http' and not (self.asr_base and self.asr_model): raise ProviderError('老师尚未配置兼容ASR服务')
+        if self.asr_backend=='tencent' and not (self.tencent_secret_id and self.tencent_secret_key):
+            raise ProviderError('老师尚未配置腾讯云语音识别密钥')
         # 云端模型对静音/持续噪声会编出 "Okay." 之类的句子；这类录音直接按“没听清”处理，不送识别、不降级。
         if self.asr_min_rms>0 and not has_speech(pcm,self.asr_min_rms):
             return {'text':'','confidence':None,'unclear':True,'provider':'gate'}
         if self.asr_fallback=='vosk' and time.monotonic()<self._asr_down_until:
             return await self._asr_fallback(pcm,rate,language)
-        try: return await self._http_asr(data,language)
+        try: return await (self._tencent_asr(data,language) if self.asr_backend=='tencent' else self._http_asr(data,language))
         except ProviderError:
             if self.asr_fallback!='vosk': raise
             self._asr_down_until=time.monotonic()+self.asr_retry_after
@@ -172,6 +198,26 @@ class Providers:
     def _asr_language(self,language:str) -> str:
         names=dict(x.split(':',1) for x in self.asr_language_map.split(',') if ':' in x)
         return names.get(language,language).strip()
+
+    async def _tencent_asr(self,data:bytes,language:str) -> dict:
+        body=json.dumps({'EngSerViceType':TENCENT_ASR_ENGINES.get(language,'16k_en'),'SourceType':1,'VoiceFormat':'wav',
+                         'Data':base64.b64encode(data).decode(),'DataLen':len(data),'FilterDirty':0,'ConvertNumMode':0},
+                        separators=(',',':')).encode()
+        ts=int(time.time())
+        headers={'Authorization':tc3_authorization(self.tencent_secret_id,self.tencent_secret_key,'asr',TENCENT_ASR_HOST,body,ts),
+                 'Content-Type':'application/json; charset=utf-8','Host':TENCENT_ASR_HOST,
+                 'X-TC-Action':'SentenceRecognition','X-TC-Version':'2019-06-14','X-TC-Timestamp':str(ts)}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.asr_timeout,connect=min(3.0,self.asr_timeout)),trust_env=False) as c:
+                r=await c.post(f'https://{TENCENT_ASR_HOST}/',headers=headers,content=body)
+                r.raise_for_status();resp=r.json()['Response']
+        except (httpx.HTTPError,ValueError,KeyError,TypeError) as exc:
+            raise ProviderError('语音识别服务调用失败；本轮不计为答错') from exc
+        if not isinstance(resp,dict) or 'Error' in resp:
+            code=(resp.get('Error') or {}).get('Code','?') if isinstance(resp,dict) else '?'
+            raise ProviderError(f'腾讯云语音识别返回错误（{code}）；本轮不计为答错')
+        text=str(resp.get('Result') or '').strip()
+        return {'text':text,'confidence':None,'unclear':not bool(text),'provider':'tencent'}
 
     async def _http_asr(self,data:bytes,language:str) -> dict:
         headers={'Authorization':'Bearer '+self.asr_key} if self.asr_key else {}

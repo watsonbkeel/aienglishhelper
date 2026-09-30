@@ -112,12 +112,61 @@ async def test_asr_without_fallback_still_reports_failure(external_http):
 
 def test_asr_env_settings(monkeypatch):
     for k,v in {'ASR_BACKEND':'http','ASR_BASE_URL':'http://x/v1','ASR_MODEL':'m','ASR_LANGUAGE_MAP':'en:English',
-                'ASR_FALLBACK':'vosk','ASR_TIMEOUT':'2.5','ASR_MIN_RMS':'150'}.items(): monkeypatch.setenv(k,v)
+                'ASR_FALLBACK':'vosk','ASR_TIMEOUT':'2.5','ASR_MIN_RMS':'150',
+                'TENCENT_SECRET_ID':'AKIDenv','TENCENT_SECRET_KEY':'envkey'}.items(): monkeypatch.setenv(k,v)
     p=Providers.from_env()
     assert (p.asr_fallback,p.asr_timeout,p.asr_min_rms,p.asr_language_map)==('vosk',2.5,150.0,'en:English')
+    assert (p.tencent_secret_id,p.tencent_secret_key)==('AKIDenv','envkey')
+    assert 'envkey' not in repr(p)
 
 @pytest.mark.asyncio
 async def test_malformed_audio_rejected_before_asr_request(external_http):
     seen,_=external_http
     with pytest.raises(ValueError): await Providers().transcribe(b'not-wav','en')
     assert not seen
+
+@pytest.mark.asyncio
+async def test_tencent_asr_signed_request_and_engine(external_http):
+    seen,response=external_http;response['json']={'Response':{'Result':'Apple.','AudioDuration':900,'RequestId':'r1'}}
+    p=Providers(asr_backend='tencent',tencent_secret_id='AKIDtest-only',tencent_secret_key='test-only-key')
+    result=await p.transcribe(speech_like(),'en')
+    assert result=={'text':'Apple.','confidence':None,'unclear':False,'provider':'tencent'}
+    req=seen[0]
+    assert str(req.url)=='https://asr.tencentcloudapi.com/'
+    assert req.headers['x-tc-action']=='SentenceRecognition' and req.headers['x-tc-version']=='2019-06-14'
+    auth=req.headers['authorization']
+    assert auth.startswith('TC3-HMAC-SHA256 Credential=AKIDtest-only/') and '/asr/tc3_request' in auth
+    assert 'SignedHeaders=content-type;host' in auth and 'test-only-key' not in auth
+    body=json.loads(req.content)
+    assert body['EngSerViceType']=='16k_en' and body['SourceType']==1 and body['VoiceFormat']=='wav'
+    import base64
+    assert body['DataLen']==len(base64.b64decode(body['Data']))
+    await p.transcribe(speech_like(),'zh')
+    assert json.loads(seen[1].content)['EngSerViceType']=='16k_zh'
+
+@pytest.mark.asyncio
+async def test_tencent_asr_error_falls_back_and_empty_is_unclear(external_http,monkeypatch):
+    seen,response=external_http
+    response['json']={'Response':{'Error':{'Code':'AuthFailure.SignatureFailure','Message':'bad'},'RequestId':'r'}}
+    p=Providers(asr_backend='tencent',tencent_secret_id='AKIDx',tencent_secret_key='k',asr_fallback='vosk')
+    monkeypatch.setattr(p,'_vosk',lambda pcm,rate,language:{'text':'apple','confidence':0.8,'unclear':False,'provider':'vosk'})
+    assert (await p.transcribe(speech_like(),'en'))['provider']=='vosk-fallback'
+    q=Providers(asr_backend='tencent',tencent_secret_id='AKIDx',tencent_secret_key='k')
+    with pytest.raises(ProviderError): await q.transcribe(speech_like(),'en')
+    response['json']={'Response':{'Result':'','RequestId':'r'}}
+    assert (await q.transcribe(speech_like(),'en'))['unclear'] is True
+
+@pytest.mark.asyncio
+async def test_tencent_asr_needs_keys_and_skips_silence(external_http):
+    seen,_=external_http
+    with pytest.raises(ProviderError): await Providers(asr_backend='tencent').transcribe(speech_like(),'en')
+    p=Providers(asr_backend='tencent',tencent_secret_id='AKIDx',tencent_secret_key='k')
+    assert (await p.transcribe(pcm_wav(b'\0'*48000),'en'))['provider']=='gate'
+    assert seen==[]
+
+def test_tencent_signature_is_deterministic():
+    from english_class.providers import tc3_authorization
+    a=tc3_authorization('AKIDx','key','asr','asr.tencentcloudapi.com',b'{}',1700000000)
+    assert a==tc3_authorization('AKIDx','key','asr','asr.tencentcloudapi.com',b'{}',1700000000)
+    assert 'Credential=AKIDx/2023-11-14/asr/tc3_request' in a
+    assert a!=tc3_authorization('AKIDx','key2','asr','asr.tencentcloudapi.com',b'{}',1700000000)
