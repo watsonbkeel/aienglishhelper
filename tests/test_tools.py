@@ -59,9 +59,94 @@ def test_pi_command_and_vad_no_training_on_silence():
     assert v.feed(b'\x00'*3200) is None
     wav=v.feed(b'\x00'*3200)
     assert wav and wav.startswith(b'RIFF')
-    assert control_action('小爱同学')=='wake'
     assert control_action('我 不 会')=='help'
     assert control_action('do not stop') is None
+
+
+def test_two_wake_states():
+    """“小陈同学，学英语”=上课；只说“小陈同学”=普通聊天；旧唤醒词小爱同学不再生效。"""
+    from pi.audio import control_action, split_wake
+    from english_class.engine import command
+    assert control_action('小陈 同学')=='chat'
+    assert control_action('小陈同学。')=='chat'
+    assert control_action('小晨 同学')=='chat'                      # Vosk 同音误识别
+    assert control_action('小陈 同学 学 英语')=='start'
+    assert control_action('小陈同学，开始英语练习')=='start'
+    assert control_action('学 英语')=='start'
+    assert control_action('小陈 同学 暂停')=='pause'
+    assert control_action('小陈 同学 今天 天气 怎么样') is None    # 聊天内容交给 route，不是课堂指令
+    assert control_action('小爱同学') is None
+    assert split_wake('小陈 同学 今天 天气 怎么样')==(True,'今天天气怎么样')
+    assert split_wake('今天天气')==(False,'今天天气')
+    assert command('小陈同学学英语')=='start' and command('小陈同学，开始今天的英语练习')=='start'
+
+
+def _idle_edge(monkeypatch):
+    from pi.english_voice import Edge
+    monkeypatch.setenv('BRAIN_URL','https://brain.example');monkeypatch.setenv('EDGE_TOKEN','edge-token-1234567890')
+    edge=Edge(play_audio=False,start_worker=False)
+    edge.stop_audio=lambda:None
+    return edge
+
+
+def _chat(calls):
+    from pi.english_voice import Chat
+    def poll(method,path,body=None):
+        calls.append((path,body));return {'ok':True,'tts_active':False}
+    return Chat(timeout=60,poll=poll)
+
+
+def _actions(edge):
+    out=[]
+    while not edge.queue.empty(): out.append(edge.queue.get_nowait()['action']);edge.queue.task_done()
+    return out
+
+
+def test_route_idle_wake_only_goes_to_original_bot(monkeypatch):
+    from pi.english_voice import route
+    edge=_idle_edge(monkeypatch);calls=[];chat=_chat(calls)
+    assert route(edge,chat,'小陈 同学',0.9,b'RIFF')=='chat'
+    assert chat.active and calls==[('/command',{'cmd':'speak_ack'})] and _actions(edge)==[]
+    assert route(edge,chat,'今天 天气 怎么样',0.9,b'RIFF')=='say'
+    assert calls[-1][0]=='/voice/input' and calls[-1][1]['text']=='今天天气怎么样' and calls[-1][1]['had_wake_word'] is False
+    assert route(edge,chat,'小陈 同学 讲 个 笑话',0.9,b'RIFF')=='say'
+    assert calls[-1][1]['text']=='讲个笑话' and calls[-1][1]['had_wake_word'] is True
+    assert calls[-1][1]['recent_context']==['今天天气怎么样']
+    assert _actions(edge)==[]                                        # 聊天内容从不发到英语脑端
+    assert route(edge,chat,'嗯',0.9,b'RIFF') is None                  # 太短的碎片不转交
+    assert route(edge,chat,'小陈 同学 学 英语',0.9,b'RIFF')=='start'
+    assert not chat.active and _actions(edge)==['start']              # 聊天中可直接切到上课
+
+
+def test_route_idle_speech_without_wake_goes_nowhere(monkeypatch):
+    from pi.english_voice import route
+    edge=_idle_edge(monkeypatch);calls=[];chat=_chat(calls)
+    assert route(edge,chat,'今天 天气 怎么样',0.9,b'RIFF') is None
+    assert route(edge,chat,'小陈 同学',0.5,b'RIFF') is None            # 置信度不够不唤醒
+    assert calls==[] and _actions(edge)==[]
+
+
+def test_route_in_class_wake_only_interrupts(monkeypatch):
+    from pi.english_voice import route
+    edge=_idle_edge(monkeypatch);calls=[];chat=_chat(calls)
+    edge.active=True;edge.phase='speak';g=edge.generation
+    assert route(edge,chat,'小陈 同学',0.9,b'RIFF')=='interrupt'
+    assert edge.generation==g+1 and not chat.active and calls==[]
+    assert route(edge,chat,'小陈 同学 学 英语',0.9,b'RIFF')=='start' and _actions(edge)==[]   # 课中不重复开始
+    assert route(edge,chat,'apple',0.3,b'RIFF')=='answer' and _actions(edge)==['answer']
+    assert route(edge,chat,'小陈 同学 暂停',0.9,b'RIFF')=='pause'
+    edge.phase='paused';assert route(edge,chat,'apple',0.3,b'RIFF') is None
+
+
+def test_chat_guard_follows_original_bot_tts(monkeypatch):
+    from pi.english_voice import Chat
+    import time
+    state={'tts':True}
+    chat=Chat(timeout=60,poll=lambda m,p,b=None:{'ok':True,'tts_active':state['tts']})
+    now=time.monotonic()
+    assert chat.guarded(now)                                          # 原机器人在说话：不收音
+    state['tts']=False
+    assert not chat.guarded(now+2)                                    # 停了 0.8 秒后恢复收音
 
 
 def test_wave_validation():

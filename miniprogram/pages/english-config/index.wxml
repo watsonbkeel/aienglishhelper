@@ -23,7 +23,7 @@
   </view>
   <button class="primary" bindtap="onSave" loading="{{saving || loading}}" disabled="{{saving || loading || !ready}}">保存设置</button>
   <button class="secondary" bindtap="onResult">看看练习结果</button>
-  <view class="start-tip">保存后，对机器人说：<text class="quote">“小爱同学，开始今天的英语练习。”</text>新设置在下一轮开始时生效。</view>
+  <view class="start-tip">保存后，对机器人说：<text class="quote">“小陈同学，学英语。”</text>新设置在下一轮开始时生效。</view>
   <view class="connection-link" bindtap="onToggleAdvanced">{{advancedOpen ? '收起' : '展开'}}高级设置：自带大模型（可选）{{llm.mode === 'custom' ? ' · 使用中' : ''}}</view>
   <view class="card" wx:if="{{advancedOpen}}">
     <view class="section-title">大模型（可选）</view>

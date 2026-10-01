@@ -9,14 +9,27 @@ import wave
 from collections import deque
 
 
-def control_action(text:str):
+# 唤醒词“小陈同学”；Vosk 小模型常把“陈”听成同音字，一并接受。
+WAKE_WORDS=('小陈同学','小晨同学','小成同学','小程同学','小辰同学','小橙同学','小沉同学')
+START_PHRASES=('学英语','开始学英语','我要学英语','我们学英语','开始英语练习','开始今天的英语练习','开始练习')
+
+
+def split_wake(text:str):
+    """返回 (是否以唤醒词开头, 去掉唤醒词、空格和标点后的剩余文字)。"""
     s=re.sub(r'[\s，。！？,.!?]','',text.lower())
-    if s in ('小爱同学','小艾同学','小愛同學'): return 'wake'
-    for w in ('小爱同学','小艾同学','小愛同學'):
-        if s.startswith(w): s=s[len(w):]
-    return {'开始英语练习':'start','开始今天的英语练习':'start','开始练习':'start','结束':'stop','结束练习':'stop',
-            '停止练习':'stop','暂停':'pause','暂停练习':'pause','继续':'resume','继续练习':'resume','再说一次':'repeat',
-            '再读一次':'repeat','慢一点':'slow','说慢一点':'slow','我不会':'help','给我提示':'help','用中文解释':'help'}.get(s)
+    for w in WAKE_WORDS:
+        if s.startswith(w): return True,s[len(w):]
+    return False,s
+
+
+def control_action(text:str):
+    """两种进入方式：“小陈同学，学英语”=上英语课(start)；只说“小陈同学”=找原机器人聊天(chat)。"""
+    had_wake,s=split_wake(text)
+    if had_wake and not s: return 'chat'
+    if s in START_PHRASES: return 'start'
+    return {'结束':'stop','结束练习':'stop','停止练习':'stop','暂停':'pause','暂停练习':'pause','继续':'resume',
+            '继续练习':'resume','再说一次':'repeat','再读一次':'repeat','慢一点':'slow','说慢一点':'slow',
+            '我不会':'help','给我提示':'help','用中文解释':'help'}.get(s)
 
 
 def wav_bytes(pcm:bytes):

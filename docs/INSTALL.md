@@ -425,11 +425,13 @@ sudo python3 /opt/english-class-edge/scripts/course_mode.py on
 sudo journalctl -u english-edge -f
 ```
 
-说：
+唤醒词是“小陈同学”，有两种说法：
 
-> 小爱同学，开始今天的英语练习。
+> 小陈同学，学英语。 —— 开始上英语课。
+>
+> 小陈同学。 —— 普通聊天：孩子接下来说的中文会交给原机器人（本机 `nox-bridge`，默认 `http://127.0.0.1:8888`）回答，并用原机器人的声音播放；2 分钟没说话自动退出聊天。聊天中再说“小陈同学，学英语”可直接切到上课。
 
-插件开启后进入课程模式，不提供原通用机器人的全部闲聊／外设功能。原 `nox-body`、`nox-bridge` 等服务和代码保持原样，但它们可能仍使用音频输出；测试时不要同时向原机器人发送播报请求。
+课中只说“小陈同学”是打断当前播报，不会切去聊天。普通聊天需要 `nox-body`、`nox-bridge` 保持运行；若原机器人的 bridge 设了 `NOX_API_TOKEN`，把同一个值写进 `/etc/english-class/pi.env`，地址不是默认值时另设 `NOX_BRIDGE_URL`。原 `nox-body`、`nox-bridge` 等服务和代码保持原样，仍由本插件独占麦克风（`nox-voice` 保持停止）。
 
 恢复原机器人：
 

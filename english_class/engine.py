@@ -94,9 +94,10 @@ def read_json(text:str) -> dict:
 
 def command(text:str) -> str|None:
     s=re.sub(r'[\s，。！？,.!?]','',text.lower())
-    for wake in ('小爱同学','小艾同学'):
+    for wake in ('小陈同学','小晨同学','小成同学','小程同学','小辰同学'):
         if s.startswith(wake): s=s[len(wake):]
     mapping={
+        '学英语':'start','开始学英语':'start','我要学英语':'start',
         '开始今天的英语练习':'start','开始英语练习':'start','开始练习':'start','startenglishpractice':'start',
         '结束':'stop','结束练习':'stop','停止练习':'stop','stoppractice':'stop',
         '暂停':'pause','暂停练习':'pause','继续':'resume','继续练习':'resume',

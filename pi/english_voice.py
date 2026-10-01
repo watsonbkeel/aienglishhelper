@@ -21,10 +21,62 @@ import wave
 from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
-from .audio import VoiceActivity,find_usb_mic,control_action,amplify
+from .audio import VoiceActivity,find_usb_mic,control_action,split_wake,amplify,WAKE_WORDS
 
 LOG=logging.getLogger('english-edge')
 TICK_SECONDS=5
+READY_MESSAGE='小陈同学已就绪。说，小陈同学，学英语，开始上课；只说小陈同学，就是普通聊天。'
+
+
+class Chat:
+    """只说“小陈同学”时的普通聊天：中文文字交给原机器人的本机 bridge，由原机器人云端回答并用它自己的声音播放。
+    不改原机器人文件；本进程仍独占麦克风，所以要按 bridge 的 tts_active 做回声屏蔽。"""
+    def __init__(self,timeout=None,poll=None):
+        self.url=os.environ.get('NOX_BRIDGE_URL','http://127.0.0.1:8888').rstrip('/')
+        token=os.environ.get('NOX_API_TOKEN','')
+        self.headers={'Authorization':'Bearer '+token} if token else {}
+        self.timeout=float(os.environ.get('CHAT_TIMEOUT','120')) if timeout is None else timeout
+        self.poll=poll or self.request
+        self.until=0.;self.guard_until=0.;self.last_poll=0.;self.history=[]
+
+    def request(self,method,path,body=None):
+        with httpx.Client(timeout=httpx.Timeout(10,connect=3)) as c:
+            r=c.request(method,self.url+path,headers=self.headers,json=body)
+            if r.status_code>=400: raise RuntimeError(f'原机器人bridge返回{r.status_code}')
+            return r.json()
+
+    @property
+    def active(self): return time.monotonic()<self.until
+
+    def enter(self):
+        """听到单独的“小陈同学”：进入/延长聊天，让原机器人应一声“我在”。"""
+        self.until=time.monotonic()+self.timeout;self.guard_until=time.monotonic()+1.5
+        try: self.poll('POST','/command',{'cmd':'speak_ack'})
+        except Exception as exc: LOG.warning('原机器人没有应答：%s',exc);return False
+        LOG.info('进入普通聊天');return True
+
+    def say(self,text,had_wake):
+        self.until=time.monotonic()+self.timeout
+        body={'text':text,'had_wake_word':had_wake,'in_conversation':True,'recent_context':self.history[-3:]}
+        try: ok=self.poll('POST','/voice/input',body).get('ok') is True
+        except Exception as exc: LOG.warning('转交原机器人失败：%s',exc);ok=False
+        if ok:
+            self.history=(self.history+[text])[-5:];self.guard_until=time.monotonic()+2.0
+            LOG.info('转交原机器人：%s',text)
+        return ok
+
+    def leave(self):
+        if self.active: LOG.info('退出普通聊天')
+        self.until=0.;self.history=[]
+
+    def guarded(self,now):
+        """原机器人正在说话（或刚发出去等它开口）时不收麦克风声音。每 0.25 秒问一次 bridge。"""
+        if now-self.last_poll>=0.25:
+            self.last_poll=now
+            try:
+                if self.poll('GET','/voice/tts_active').get('tts_active'): self.guard_until=max(self.guard_until,now+0.8)
+            except Exception: pass
+        return now<self.guard_until
 
 
 def load_env(path:Path):
@@ -161,19 +213,50 @@ class Edge:
         self.stop_event.set();self.stop_audio()
 
 
-def recognize_control(model,wav):
+def recognize_chinese(model,wav):
+    """本机中文识别，返回 (文字, 平均置信度)。"""
     import vosk
     with wave.open(io.BytesIO(wav),'rb') as w: pcm=w.readframes(w.getnframes())
     rec=vosk.KaldiRecognizer(model,16000);rec.SetWords(True)
     rec.AcceptWaveform(pcm);result=json.loads(rec.FinalResult())
     words=result.get('result',[])
     confidence=sum(w.get('conf',0) for w in words)/len(words) if words else 0
-    text=result.get('text','')
+    return result.get('text',''),confidence
+
+
+def recognize_control(model,wav):
+    text,confidence=recognize_chinese(model,wav)
     # Control recognition is not constrained to one expected answer.
     return control_action(text) if confidence>=0.70 else None
 
 
-def voice_loop(edge):
+def heard_wake(partial:str) -> bool:
+    return any(w in partial.replace(' ','') for w in WAKE_WORDS)
+
+
+def route(edge,chat,text,confidence,wav):
+    """一段语音的去向。上课优先：课中“小陈同学”只打断播报，不切去聊天。
+    空闲时“小陈同学，学英语”上课，“小陈同学”聊天；聊天中的后续句子转交原机器人，再说“小陈同学，学英语”可直接切到上课。"""
+    action=control_action(text) if confidence>=0.70 else None
+    had_wake,rest=split_wake(text)
+    if action=='start':
+        chat.leave()
+        if not edge.active: edge.submit('start')
+        return 'start'
+    if edge.active:
+        if action=='chat': edge.generation+=1;edge.stop_audio();return 'interrupt'
+        if action: edge.submit(action);return action
+        if edge.phase!='paused': edge.submit(wav=wav);return 'answer'
+        return None
+    if action=='chat': chat.enter();return 'chat'
+    if chat.active and (had_wake or confidence>=0.5) and len(rest)>=2:
+        chat.say(rest,had_wake);return 'say'
+    # Idle environmental speech is never sent anywhere.
+    return None
+
+
+def voice_loop(edge,chat=None):
+    chat=chat or Chat()
     import vosk
     model_path=Path(os.environ.get('VOSK_ZH_PATH','models/vosk-model-small-cn-0.22'))
     if not model_path.is_dir(): raise RuntimeError('中文唤醒模型不存在：先安装模型或指向原aibot中文模型目录')
@@ -185,7 +268,7 @@ def voice_loop(edge):
     if not 0.25<=gain<=8 or not 50<=threshold<=10000: raise ValueError('MIC_GAIN应在0.25—8，VAD_THRESHOLD应在50—10000')
     vad=VoiceActivity(threshold=threshold)
     proc=subprocess.Popen(['arecord','-q','-D',capture,'-t','raw','-f','S16_LE','-r','16000','-c','1'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-    edge.local_message('英语练习已就绪。请说，小爱同学，开始英语练习。')
+    edge.local_message(READY_MESSAGE)
     guard_until=time.monotonic()+0.4;was_playing=False;last_tick=time.monotonic()
     try:
         while not edge.stop_event.is_set():
@@ -199,25 +282,20 @@ def voice_loop(edge):
                     heard=json.loads(wake.Result()).get('text','');action=control_action(heard)
                     if action in ('stop','pause'): edge.submit(action)
                 else:
-                    partial=json.loads(wake.PartialResult()).get('partial','').replace(' ','')
-                    if '小爱同学' in partial or '小艾同学' in partial:
+                    partial=json.loads(wake.PartialResult()).get('partial','')
+                    if heard_wake(partial):
                         edge.generation+=1;edge.stop_audio();guard_until=now+0.4
                         wake=vosk.KaldiRecognizer(model,16000)
                 continue
             if was_playing:
                 was_playing=False;guard_until=now+0.35;vad.reset();wake=vosk.KaldiRecognizer(model,16000)
             # Chinese stop/pause remains usable while waiting for a network response.
-            if now<guard_until:
+            if now<guard_until or (not edge.active and chat.active and chat.guarded(now)):
                 vad.reset();continue
             wav=vad.feed(chunk)
             if wav:
-                action=recognize_control(model,wav)
-                if action=='wake':
-                    if not edge.active: edge.submit('start')
-                    else: edge.generation+=1;edge.stop_audio()
-                elif action: edge.submit(action)
-                elif edge.active and edge.phase!='paused': edge.submit(wav=wav)
-                # Idle environmental speech is never sent to the server.
+                text,confidence=recognize_chinese(model,wav)
+                route(edge,chat,text,confidence,wav)
             # 5 秒轮询一次，脑端据此判断 20 秒重问、3 分钟自动暂停（服务器决定，这里不计时）。
             if now-last_tick>TICK_SECONDS and edge.submit_tick(): last_tick=now
     finally:
