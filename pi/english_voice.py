@@ -146,10 +146,10 @@ class Edge:
             self.busy=False;self.last_activity=time.monotonic()
 
     def note_question(self,result):
-        """题目位置变了（开始/换词/换阶段/对话下一轮）才算换题；“没听清再说一次”不算。"""
-        key=(result.get('session_id'),result.get('phase'),result.get('word_index'))
-        if key!=self.question_key or (result.get('phase')=='dialog' and result.get('segments')):
-            self.spoken+=1
+        """题目位置变了（开始/换词/换阶段/对话下一轮）才算换题；“没听清再说一次”不算。
+        对话阶段的轮次用脑端返回的 dialog_count 区分，不能用“有没有播报内容”判断——没听清的重问也有播报。"""
+        key=(result.get('session_id'),result.get('phase'),result.get('word_index'),result.get('dialog_count'))
+        if key!=self.question_key: self.spoken+=1
         self.question_key=key
 
     def report_played(self):

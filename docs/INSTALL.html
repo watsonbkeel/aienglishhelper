@@ -134,7 +134,7 @@ VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
 <ul>
 <li>需要在腾讯云控制台开通「语音识别」；按调用量计费（有每月免费额度，超出后付费或购买资源包），欠费或额度耗尽时本轮自动改用本机 Vosk。</li>
 <li>建议用只授权语音识别（QcloudASRFullAccess）的子账号密钥，不用主账号密钥。</li>
-<li>静音/噪声仍先经 <code>ASR_MIN_RMS</code> 拦截，不送腾讯云、不计费。学生录音会传到腾讯云转文字。</li>
+<li>静音/噪声仍先经 <code>ASR_MIN_RMS</code> 拦截，不送腾讯云、不计费。判断方法：按30毫秒分帧，至少连续2帧（60毫秒）音量≥<code>ASR_MIN_RMS</code> 且≥底噪2.5倍才算有人说话——只说一个短词（yes/apple）也能通过，静音、单下咔哒声、持续白噪声不通过。学生录音会传到腾讯云转文字。</li><li><code>ASR_TIMEOUT</code> 是整次识别调用的总上限（不是单次读超时），超时即本轮改用 Vosk。</li><li>日志：公共服务每次识别记一行 <code>asr backend=… provider=… fallback=0/1 code=… request_id=… ms=…</code>（<code>journalctl -u english-public</code>），脑端记 <code>asr class_request=… provider=… asr_request=…</code>，用课堂请求编号和腾讯 RequestId 对得上；不记密钥、签名、音频或识别文本。</li>
 <li>香港 Qwen3-ASR 恢复后想切回：<code>ASR_BACKEND=http</code>，其余配置保留原值即可。</li>
 </ul>
 <p><strong>此前配置（2026-09-29）</strong>：英文和中文识别都走香港 GPU 服务器上的 Qwen3-ASR（<code>http://&lt;香港ASR的Tailscale地址&gt;:3102/v1</code>，仅 Tailscale 内网，无公网），每句约 0.2 秒；本机 Vosk 小模型只做兜底。</p>
@@ -149,7 +149,7 @@ ASR_RETRY_AFTER=60
 ASR_MIN_RMS=200
 VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
 </code></pre>
-<ul><li>该服务的 language 必须是 <code>English</code>/<code>Chinese</code>，传 <code>en</code>/<code>zh</code> 会返回 502，所以要配 <code>ASR_LANGUAGE_MAP</code>。</li><li>云端模型对静音、持续噪声会编出 &quot;Okay.&quot; &quot;I&#x27;m sorry.&quot;；<code>ASR_MIN_RMS</code> 先判断有没有人声，没有就按“没听清”处理（不降级、不送云端）。</li><li>云端失败或超过 <code>ASR_TIMEOUT</code> 秒，本轮改用本机 Vosk，之后 <code>ASR_RETRY_AFTER</code> 秒内直接走本机，不让每轮都等超时。</li><li>服务不需要密钥时 <code>ASR_API_KEY</code> 留空即可。学生录音会传到香港服务器转文字。</li></ul>
+<ul><li>该服务的 language 必须是 <code>English</code>/<code>Chinese</code>，传 <code>en</code>/<code>zh</code> 会返回 502，所以要配 <code>ASR_LANGUAGE_MAP</code>。</li><li>云端模型对静音、持续噪声会编出 &quot;Okay.&quot; &quot;I&#x27;m sorry.&quot;；<code>ASR_MIN_RMS</code> 先判断有没有人声，没有就按“没听清”处理（不降级、不送云端）。</li><li>云端失败、返回格式异常或整次调用超过 <code>ASR_TIMEOUT</code> 秒，本轮改用本机 Vosk，之后 <code>ASR_RETRY_AFTER</code> 秒内直接走本机，不让每轮都等超时；返回结果带 <code>fallback_reason</code>（错误码/Timeout/CoolingDown）。</li><li>服务不需要密钥时 <code>ASR_API_KEY</code> 留空即可。学生录音会传到香港服务器转文字。</li></ul>
 <p>该模式要求服务支持 <code>POST /audio/transcriptions</code>，multipart 上传 WAV，返回包含 <code>text</code> 的 JSON。不要把 DeepSeek 文本对话接口填到 ASR 地址，它并不是本适配器的录音转写接口。没有返回置信度的服务会保留 <code>confidence=null</code>，程序不伪造识别分数。</p>
 <h3>4.3 语音合成</h3>
 <p>默认延续原 aibot 使用的 Edge TTS 方式：</p>

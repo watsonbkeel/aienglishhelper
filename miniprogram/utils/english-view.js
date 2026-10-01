@@ -6,8 +6,9 @@ function statusText(row) {
 function evidenceText(row) {
   // 旧记录没有这些字段时不显示，避免把“没有数据”说成“0 次”。
   if (!row.used_word_count && !row.imitated_count) return ''
-  const own = `累计说出目标词 ${row.used_word_count || 0} 次`
-  return row.imitated_count ? `${own}，其中跟读/模仿 ${row.imitated_count} 次（跟读不算会说）` : own
+  // 两个计数是独立累计的（跟读时说出目标词两边都会加1），不是“其中”关系，分开写。
+  const own = `说出目标词 ${row.used_word_count || 0} 次`
+  return row.imitated_count ? `${own}；跟读/模仿 ${row.imitated_count} 次（跟读不算会说）` : own
 }
 function buildReport(payload) {
   if (!payload || !Array.isArray(payload.words) || typeof payload.today !== 'string') throw new Error('进度数据格式不正确')

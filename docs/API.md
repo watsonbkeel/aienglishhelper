@@ -63,7 +63,7 @@ status0/1/2/null；保存历史最大档。unclear=true必须status=null，增�
 
 `POST /internal/chat`、`/internal/asr?language=en|zh`、`/internal/tts` 需要brain角色和自己的student_id。仅服务器本机访问，不在Nginx中公开。
 
-模型入参messages与json_output；有学生自带模型时先调它，调用失败或json_output时返回非JSON，就记录last_status=fallback与错误原因并改用平台模型；响应含`provider`（custom/platform）。ASR输入原始16kHz单声道16位PCM WAV，返回text/confidence/null/unclear/provider；provider为vosk、http、tencent（腾讯云一句话识别）、gate（静音或噪声被拦截，text为空、unclear=true）或vosk-fallback（云端失败改用本机）；TTS输入segments[{text,language}]和slow，输出WAV。真供应商密钥只在公共服务。
+模型入参messages与json_output；有学生自带模型时先调它，调用失败或json_output时返回非JSON，就记录last_status=fallback与错误原因并改用平台模型；响应含`provider`（custom/platform）。ASR输入原始16kHz单声道16位PCM WAV，返回text/confidence/null/unclear/provider；provider为vosk、http、tencent（腾讯云一句话识别）、gate（静音或噪声被拦截，text为空、unclear=true）或vosk-fallback（云端失败改用本机）；云端识别可带request_id（供应商请求编号）；vosk-fallback另带fallback_reason（供应商错误码，或Timeout/NetworkError/HTTPxxx/MalformedResponse/MalformedError/CoolingDown）。腾讯云只有字符串Result才算成功，Result缺失/非字符串、Error格式异常都按协议错误降级，不算“没听清”；ASR_TIMEOUT为整次调用总上限。TTS输入segments[{text,language}]和slow，输出WAV。真供应商密钥只在公共服务。
 
 ## 树莓派到本人脑端
 
@@ -73,7 +73,7 @@ status0/1/2/null；保存历史最大档。unclear=true必须status=null，增�
 - `POST /voice/audio?request_id=...`：原始WAV，request_id8—80字符、最大1MB。根据当前题目选择识别语言；识别与推进在同一个串行锁内完成。
 - `POST /voice/speech`：`{segments:[{text,language}],slow:false}`，返回WAV。将已生成文本合成为语音，不再次更新学习记录。
 
-/voice/turn和/voice/audio返回 `ok/active/phase/session_id/expected_language/segments/slow/word_index/word_count/request_id`；audio另有recognized_text。tick、played不算一次回答、不写进度。played由树莓派在一段语音播放完毕后上报，沉默计时从播放结束开始。树莓派空闲（未在处理、未在播放、队列为空）时每5秒发一次tick，服务端据此判断沉默：播放结束后20秒、40秒无人说话时返回简短重问（每题最多2次），3分钟无人说话时自动暂停（active=false）并保存断点；其余tick返回空segments。
+/voice/turn和/voice/audio返回 `ok/active/phase/session_id/expected_language/segments/slow/word_index/word_count/dialog_count/request_id`；audio另有recognized_text和asr_provider（实际识别来源，见上）。dialog_count为本节已完成的对话轮数，树莓派用 (session_id,phase,word_index,dialog_count) 判断是否换题：没听清的重问不变，旧录音仍可送判；变了则丢弃换题前录下的回答。tick、played不算一次回答、不写进度。played由树莓派在一段语音播放完毕后上报，沉默计时从播放结束开始。树莓派空闲（未在处理、未在播放、队列为空）时每5秒发一次tick，服务端据此判断沉默：播放结束后20秒、40秒无人说话时返回简短重问（每题最多2次），3分钟无人说话时自动暂停（active=false）并保存断点；其余tick返回空segments。
 
 断点：保存在大脑的systemd StateDirectory（`/var/lib/english-class-brain/<sid>/resume.json`，可用环境变量RESUME_STATE_PATH覆盖），内容为本批单词、当前位置和阶段（listen/recall）。下次start若断点7天内有效且学习配置未改，回复以“接着上次继续。”开头并从原位置继续；配置改变、过期、进入对话阶段或整节课完成时断点清除。单词进度仍实时写入，不依赖断点。
 

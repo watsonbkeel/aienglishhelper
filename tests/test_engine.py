@@ -472,3 +472,51 @@ async def test_dialog_llm_can_flag_modelled_words():
     io.chat=chat
     await t.turn('I like apples',request_id='dialog-01')
     assert t.last_demonstrated=={'b'}
+
+
+# ---- 第二轮评审：变形不过宽、线索泄露看变形、回忆升级须说出目标词、对话轮次可区分 ----
+def test_inflection_does_not_match_unrelated_short_words():
+    from english_class.engine import mentions_word
+    for text,word in [('I sleep in bed','be'),('it is red','I'),('I like its color','it'),('they wed','we'),
+                      ('plant a seed','see'),('I am hoping','hop'),('my toes','to')]:
+        assert not mentions_word(text,word),(text,word)
+    for text,word in [('it is good','be'),('they were here','be'),('I am','I'),('she sees it','see'),('I saw it','see'),
+                      ('hopping fast','hop'),('he hopped','hop'),('it goes','go'),('I used it','use'),('we agreed','agree')]:
+        assert mentions_word(text,word),(text,word)
+
+@pytest.mark.asyncio
+async def test_english_cue_with_inflected_answer_is_rejected():
+    from english_class.engine import Tutor
+    from english_class.client import ServiceError
+    io=MemoryIO();io.config_value['chinese_help']=False;t=Tutor(io)
+    await t.turn('',action='start',request_id='start-00')
+    orig=io.chat
+    async def chat(messages,json_output=True):
+        if 'ENGLISH_CUE' in messages[0]['content']: return json.dumps({'cue':'Do you like apples?'})
+        return await orig(messages,json_output)
+    io.chat=chat
+    t.phase='recall';t.index=0
+    with pytest.raises(ServiceError): await t.prompt()
+
+@pytest.mark.asyncio
+async def test_recall_judged_correct_without_target_word_does_not_upgrade():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);await t.turn('',action='start',request_id='start-00')
+    for i,a in enumerate(['苹果','香蕉','书包']): await t.turn(a,request_id=f'listen-{i}')
+    orig=io.chat
+    async def chat(messages,json_output=True):
+        if 'VOCABULARY_JUDGE' in messages[0]['content']: return json.dumps({'correct':True})
+        return await orig(messages,json_output)
+    io.chat=chat
+    r=await t.turn('a red fruit',request_id='recall-0')
+    assert io.rows['a']['status']==1 and t.index==1
+    assert io.evidence[-1]==('a',None,{'answer_valid':True,'used_word':False,'imitated':False})
+
+@pytest.mark.asyncio
+async def test_result_exposes_dialog_count_for_edge_question_tracking():
+    from english_class.engine import Tutor
+    io=MemoryIO();t=Tutor(io);r=await t.turn('',action='start',request_id='start-00')
+    assert r['dialog_count']==0
+    t.phase='dialog';t.known={'a':1,'b':1,'c':1}
+    r=await t.turn('I like apples',request_id='dialog-01');assert r['dialog_count']==1
+    r=await t.turn('xx',unclear=True,request_id='dialog-02');assert r['dialog_count']==1

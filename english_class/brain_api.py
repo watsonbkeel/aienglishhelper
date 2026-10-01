@@ -5,6 +5,7 @@ import copy
 import hashlib
 import hmac
 import json
+import logging
 import os
 from collections import OrderedDict
 from pathlib import Path
@@ -13,6 +14,8 @@ from fastapi.responses import Response
 from .client import PublicClient, ServiceError
 from .engine import Tutor
 from .models import TurnInput, SpeechInput
+
+LOG=logging.getLogger('english-class.brain')
 
 
 def create_brain(io,edge_token:str,student_prompt:str='',practice_size:int=3,state_path=None):
@@ -72,12 +75,17 @@ def create_brain(io,edge_token:str,student_prompt:str='',practice_size:int=3,sta
                 if prior_fp!=fingerprint: raise HTTPException(409,'录音请求编号重复但内容不同')
             else:
                 try: asr=await io.transcribe(wav,tutor.last_expected)
-                except (ServiceError,ValueError) as exc: raise HTTPException(503,str(exc)) from exc
+                except (ServiceError,ValueError) as exc:
+                    LOG.warning('asr failed class_request=%s error=%s',request_id,exc)
+                    raise HTTPException(503,str(exc)) from exc
+                # 课堂请求编号与识别服务请求编号对上，便于事后排查；不记录音频和识别文本。
+                LOG.info('asr class_request=%s provider=%s fallback_reason=%s asr_request=%s unclear=%d',request_id,
+                         asr.get('provider','-'),asr.get('fallback_reason') or '-',asr.get('request_id') or '-',int(bool(asr.get('unclear'))))
                 audio_cache[request_id]=(fingerprint,asr)
                 while len(audio_cache)>128: audio_cache.popitem(last=False)
             body=TurnInput(text=asr['text'],confidence=asr.get('confidence'),unclear=asr.get('unclear',False),request_id=request_id)
             reply=await run_turn_locked(body,fingerprint)
-            return {**reply,'recognized_text':asr['text']}
+            return {**reply,'recognized_text':asr['text'],'asr_provider':asr.get('provider')}
 
     @app.post('/voice/speech',dependencies=[Depends(auth)])
     async def speech(body:SpeechInput):

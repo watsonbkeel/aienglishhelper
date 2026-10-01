@@ -40,20 +40,26 @@ IRREGULAR={
     'good':['better','best'],'bad':['worse','worst'],
 }
 
+IRREGULAR_NOT_VERB={'child','man','woman','foot','tooth','mouse','person','fish','sheep','leaf','knife','wife','life','good','bad'}
+
 def word_forms(word:str) -> set[str]:
     w=word.lower().strip();forms={w}
     if not re.fullmatch(r"[a-z']+",w): return forms
-    forms.update(IRREGULAR.get(w,[]))
+    irregular=IRREGULAR.get(w)
+    forms.update(irregular or [])
+    # 两个字母以内的词（be/I/it/we/to…）按规则加词尾会撞上别的词：bed、is、its、wed、toes；只认原形和不规则表。
+    if len(w)<=2: return forms
     vowels='aeiou'
-    if w.endswith('y') and len(w)>1 and w[-2] not in vowels: forms.update({w[:-1]+'ies',w[:-1]+'ied'})
+    if w.endswith('y') and w[-2] not in vowels: forms.update({w[:-1]+'ies',w[:-1]+'ied'})
     elif re.search(r'(s|x|z|ch|sh|o)$',w): forms.add(w+'es')
-    else: forms.add(w+'s')
     forms.add(w+'s')
-    forms.update({w+'d'} if w.endswith('e') else {w+'ed'})
-    forms.add(w[:-1]+'ing' if w.endswith('e') and not w.endswith('ee') and len(w)>2 else w+'ing')
-    # 重读闭音节双写：run→running, stop→stopped
-    if len(w)<=4 and re.search(r'[^aeiou][aeiou][bdgklmnprt]$',w):
+    # 单音节重读闭音节双写：run→running, stop→stopped；此时不再生成 hoping/hoped 这种别的词。
+    if re.search(r'[^aeiou][aeiou][bdgklmnprt]$',w) and len(re.findall(r'[aeiou]+',w))==1:
         forms.update({w+w[-1]+'ing',w+w[-1]+'ed'})
+        return forms
+    forms.add(w[:-1]+'ing' if w.endswith('e') and not w.endswith('ee') else w+'ing')
+    # 过去式有不规则形式的动词（see→saw）不再按规则加 -d/-ed，避免 see→seed；不规则名词/形容词照常（fish→fished）。
+    if not irregular or w in IRREGULAR_NOT_VERB: forms.add(w+'d' if w.endswith('e') else w+'ed')
     return forms
 
 def mentions_word(text:str,word:str) -> bool:
@@ -201,7 +207,7 @@ class Tutor:
         return {'ok':True,'active':self.phase not in ('idle','done'),'phase':phase or self.phase,
                 'session_id':self.session_id,'expected_language':self.last_expected,
                 'segments':segments if segments is not None else self.last_segments,
-                'slow':self.slow,'word_index':self.index,'word_count':len(self.words)}
+                'slow':self.slow,'word_index':self.index,'word_count':len(self.words),'dialog_count':self.dialog_count}
 
     def message(self,zh:str,en:str):
         use_zh=self.config.get('chinese_help',True)
@@ -249,7 +255,8 @@ class Tutor:
                     {'role':'system','content':'ENGLISH_CUE: Return JSON {"cue":"one short question"}. Ask the learner ('+learner_stage(self.config.get('grade'))[0]+') to retrieve the target word from its meaning. Do NOT include the target word, its translation, or its spelling. '+learner_stage(self.config.get('grade'))[1]+' No more than 20 words.'},
                     {'role':'user','content':json.dumps(word,ensure_ascii=False)}]))
                 cue=obj.get('cue')
-                if not isinstance(cue,str) or not cue.strip() or len(cue)>200 or contains_word(cue,word['word']):
+                # 用 mentions_word：线索里出现 apples/went 这类变形同样等于泄露答案。
+                if not isinstance(cue,str) or not cue.strip() or len(cue)>200 or mentions_word(cue,word['word']):
                     raise ServiceError('AI提示泄露了目标答案或格式无效，请重试本轮')
                 full=short=[{'text':cue,'language':'en'}]
         else:
@@ -414,9 +421,11 @@ class Tutor:
         if self.phase=='recall':
             word=self.words[self.index];correct=await self.judge('recall',word,text)
             imitated=word['word_id'] in self.last_demonstrated
-            eligible=correct and self.known.get(word['word_id'],0)>=1 and not imitated
+            used=mentions_word(text,word['word'])
+            # “会说了”必须真的说出目标词（含变形）；判题说对但没说出这个词（如用描述代替）不升级。
+            eligible=correct and used and self.known.get(word['word_id'],0)>=1 and not imitated
             await self.save(word,2 if eligible else None,False,request_id,
-                            {'answer_valid':correct,'used_word':mentions_word(text,word['word']),'imitated':imitated})
+                            {'answer_valid':correct,'used_word':used,'imitated':imitated})
             if correct:
                 return self.result(self.message('对！','Right!')+await self.advance())
             self.phase='repeat';self.repeat_tries=0

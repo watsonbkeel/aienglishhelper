@@ -150,7 +150,9 @@ VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
 
 - 需要在腾讯云控制台开通「语音识别」；按调用量计费（有每月免费额度，超出后付费或购买资源包），欠费或额度耗尽时本轮自动改用本机 Vosk。
 - 建议用只授权语音识别（QcloudASRFullAccess）的子账号密钥，不用主账号密钥。
-- 静音/噪声仍先经 `ASR_MIN_RMS` 拦截，不送腾讯云、不计费。学生录音会传到腾讯云转文字。
+- 静音/噪声仍先经 `ASR_MIN_RMS` 拦截，不送腾讯云、不计费。判断方法：按30毫秒分帧，至少连续2帧（60毫秒）音量≥`ASR_MIN_RMS` 且≥底噪2.5倍才算有人说话——只说一个短词（yes/apple）也能通过，静音、单下咔哒声、持续白噪声不通过。学生录音会传到腾讯云转文字。
+- `ASR_TIMEOUT` 是整次识别调用的总上限（不是单次读超时），超时即本轮改用 Vosk。
+- 日志：公共服务每次识别记一行 `asr backend=… provider=… fallback=0/1 code=… request_id=… ms=…`（`journalctl -u english-public`），脑端记 `asr class_request=… provider=… asr_request=…`，用课堂请求编号和腾讯 RequestId 对得上；不记密钥、签名、音频或识别文本。
 - 香港 Qwen3-ASR 恢复后想切回：`ASR_BACKEND=http`，其余 `ASR_BASE_URL`/`ASR_MODEL`/`ASR_LANGUAGE_MAP` 保留原值即可。
 
 **此前配置（2026-09-29）**：英文和中文识别都走香港 GPU 服务器上的 Qwen3-ASR（`http://<香港ASR的Tailscale地址>:3102/v1`，仅 Tailscale 内网，无公网），每句约 0.2 秒；本机 Vosk 小模型只做兜底。
@@ -170,7 +172,7 @@ VOSK_EN_PATH=/opt/english-class/models/vosk-model-small-en-us-0.15
 
 - 该服务的 language 必须是 `English`/`Chinese`，传 `en`/`zh` 会返回 502，所以要配 `ASR_LANGUAGE_MAP`。
 - 云端模型对静音、持续噪声会编出 "Okay." "I'm sorry."；`ASR_MIN_RMS` 先判断有没有人声，没有就按"没听清"处理（不降级、不送云端）。
-- 云端失败或超过 `ASR_TIMEOUT` 秒，本轮改用本机 Vosk，之后 `ASR_RETRY_AFTER` 秒内直接走本机，不让每轮都等超时。
+- 云端失败、返回格式异常或整次调用超过 `ASR_TIMEOUT` 秒，本轮改用本机 Vosk，之后 `ASR_RETRY_AFTER` 秒内直接走本机，不让每轮都等超时；返回结果带 `fallback_reason`（错误码/Timeout/CoolingDown）。
 - 服务不需要密钥时 `ASR_API_KEY` 留空即可。学生录音会传到香港服务器转文字。
 
 该模式要求服务支持 `POST /audio/transcriptions`，multipart 上传 WAV，返回包含 `text` 的 JSON。不要把 DeepSeek 文本对话接口填到 ASR 地址，它并不是本适配器的录音转写接口。没有返回置信度的服务会保留 `confidence=null`，程序不伪造识别分数。

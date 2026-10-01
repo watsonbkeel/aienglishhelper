@@ -184,3 +184,26 @@ def test_pi_reports_playback_end_after_speaking(monkeypatch):
     edge.submit('start');edge.process(edge.queue.get_nowait());edge.queue.task_done()
     paths=[(p,(b or {}).get('action')) for p,b in calls]
     assert paths[-2:]==[('/voice/speech',None),('/voice/turn','played')]
+
+def test_pi_dialog_unclear_keeps_queued_answer_but_next_turn_discards_it(monkeypatch):
+    from pi.english_voice import Edge
+    monkeypatch.setenv('BRAIN_URL','https://brain.example');monkeypatch.setenv('EDGE_TOKEN','edge-token-1234567890')
+    edge=Edge(play_audio=True,start_worker=False)
+    state={'n':0};calls=[]
+    def request(path,*,body=None,content=None,params=None,raw=False):
+        calls.append(path)
+        if path=='/voice/speech': return b'RIFF'
+        base={'active':True,'phase':'dialog','session_id':'s','word_index':2}
+        if body and body.get('action') in ('played','tick'): return {**base,'dialog_count':state['n'],'segments':[]}
+        if body and body.get('text')=='???':   # 对话阶段没听清：有播报内容，但不是新一轮
+            return {**base,'dialog_count':state['n'],'segments':[{'text':'Again, please.','language':'en'}]}
+        state['n']+=1
+        return {**base,'dialog_count':state['n'],'segments':[{'text':'What else do you like?','language':'en'}]}
+    edge.request=request;edge.play=lambda wav:None;edge.local_message=lambda text:None
+    edge.process({'generation':edge.generation,'action':'answer','text':'I like apples','wav':None,'request_id':'dlg-000001','spoken':edge.spoken})
+    edge.submit(wav=b'RIFF-queued');queued=edge.queue.get_nowait();edge.queue.task_done()
+    edge.process({'generation':edge.generation,'action':'answer','text':'???','wav':None,'request_id':'dlg-000002','spoken':edge.spoken})
+    assert queued['spoken']==edge.spoken            # 没听清的重问不算换题
+    edge.process({'generation':edge.generation,'action':'answer','text':'I like bananas','wav':None,'request_id':'dlg-000003','spoken':edge.spoken})
+    calls.clear();edge.process(queued)
+    assert '/voice/audio' not in calls              # 对话进入下一轮，旧录音不再送去判

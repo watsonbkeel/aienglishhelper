@@ -8,6 +8,7 @@ import hmac
 import io
 import ipaddress
 import json
+import logging
 import math
 import os
 import socket
@@ -21,8 +22,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
 
+ASR_LOG=logging.getLogger('english-class.asr')
+
+
 class ProviderError(RuntimeError):
-    pass
+    """code：供应商错误码或本地分类（Timeout/HTTPError/MalformedResponse…）；request_id：供应商返回的请求编号。"""
+    def __init__(self,message:str,*,code:str|None=None,request_id:str|None=None):
+        super().__init__(message);self.code=code;self.request_id=request_id
 
 
 def validate_wav(data:bytes) -> tuple[bytes,int]:
@@ -62,15 +68,27 @@ def mask_key(key:str) -> str:
     return (key[:3]+'…'+key[-4:]) if len(key)>=12 else '已设置'
 
 
+GATE_FRAME_MS=30
+GATE_FLOOR_PERCENTILE=0.05   # 底噪取最安静的5%帧：树莓派录音前后都有静音，这部分就是环境底噪
+GATE_FLOOR_RATIO=2.5         # 有声帧须高于底噪2.5倍（持续白噪声每帧都差不多响，过不了）
+GATE_MIN_RUN=2               # 至少连续2帧（60毫秒）有声：一个单词能过，一下咔哒声过不了
+
+
 def has_speech(pcm:bytes,min_rms:float,rate:int=16000) -> bool:
-    """粗判是否有人说话：按30毫秒分帧，响的帧要够响，且明显高于底噪（静音、持续白噪声都不算）。"""
+    """粗判是否有人说话：按30毫秒分帧，看“有声帧”是否连续出现。
+    有声帧 = 音量≥min_rms 且 ≥底噪×2.5。不看整段的高分位音量——
+    树莓派切出的录音有约0.3秒前导和1秒尾部静音，只说一个短词时有声帧不到一成，高分位会落在静音上。"""
     a=array.array('h');a.frombytes(pcm[:len(pcm)//2*2])
-    size=rate*30//1000
-    levels=sorted(math.sqrt(sum(v*v for v in a[i:i+size])/size) for i in range(0,len(a)-size+1,size))
+    size=rate*GATE_FRAME_MS//1000
+    levels=[math.sqrt(sum(v*v for v in a[i:i+size])/size) for i in range(0,len(a)-size+1,size)]
     if not levels: return False
-    loud=levels[int(len(levels)*0.9)] if len(levels)>=10 else levels[-1]
-    floor=levels[int(len(levels)*0.1)]
-    return loud>=min_rms and loud>=2*max(floor,1.0)
+    floor=sorted(levels)[int(len(levels)*GATE_FLOOR_PERCENTILE)]
+    threshold=max(min_rms,GATE_FLOOR_RATIO*max(floor,1.0))
+    run=0
+    for level in levels:
+        run=run+1 if level>=threshold else 0
+        if run>=GATE_MIN_RUN: return True
+    return False
 
 
 TENCENT_ASR_HOST='asr.tencentcloudapi.com'
@@ -173,6 +191,17 @@ class Providers:
             raise ProviderError(('自带模型调用失败' if llm else '模型调用失败；请检查公共层模型名、接口地址和凭证')) from exc
 
     async def transcribe(self,data:bytes,language:str) -> dict:
+        started=time.monotonic()
+        result=await self._transcribe(data,language)
+        if self.asr_backend in ('http','tencent'):
+            # 只记诊断字段；不记密钥、签名、音频或识别文本。
+            ASR_LOG.info('asr backend=%s provider=%s fallback=%d code=%s request_id=%s ms=%d unclear=%d',
+                         self.asr_backend,result.get('provider'),int(result.get('provider')=='vosk-fallback'),
+                         result.get('fallback_reason') or '-',result.get('request_id') or '-',
+                         int((time.monotonic()-started)*1000),int(bool(result.get('unclear'))))
+        return result
+
+    async def _transcribe(self,data:bytes,language:str) -> dict:
         pcm,rate=validate_wav(data)
         if self.asr_backend=='vosk':
             return await asyncio.to_thread(self._vosk,pcm,rate,language)
@@ -184,16 +213,23 @@ class Providers:
         if self.asr_min_rms>0 and not has_speech(pcm,self.asr_min_rms):
             return {'text':'','confidence':None,'unclear':True,'provider':'gate'}
         if self.asr_fallback=='vosk' and time.monotonic()<self._asr_down_until:
-            return await self._asr_fallback(pcm,rate,language)
-        try: return await (self._tencent_asr(data,language) if self.asr_backend=='tencent' else self._http_asr(data,language))
-        except ProviderError:
-            if self.asr_fallback!='vosk': raise
-            self._asr_down_until=time.monotonic()+self.asr_retry_after
-            return await self._asr_fallback(pcm,rate,language)
+            return await self._asr_fallback(pcm,rate,language,'CoolingDown')
+        call=self._tencent_asr(data,language) if self.asr_backend=='tencent' else self._http_asr(data,language)
+        try:
+            # wait_for 限制整次调用；httpx 的读超时只管“两块数据之间”，慢速分块返回会远超 ASR_TIMEOUT。
+            return await asyncio.wait_for(call,self.asr_timeout)
+        except asyncio.TimeoutError:
+            error=ProviderError('语音识别服务响应超时；本轮不计为答错',code='Timeout')
+        except ProviderError as exc: error=exc
+        if self.asr_fallback!='vosk': raise error
+        self._asr_down_until=time.monotonic()+self.asr_retry_after
+        return await self._asr_fallback(pcm,rate,language,error.code or 'Error',error.request_id)
 
-    async def _asr_fallback(self,pcm:bytes,rate:int,language:str) -> dict:
+    async def _asr_fallback(self,pcm:bytes,rate:int,language:str,reason:str,request_id:str|None=None) -> dict:
         result=await asyncio.to_thread(self._vosk,pcm,rate,language)
-        return {**result,'provider':'vosk-fallback'}
+        out={**result,'provider':'vosk-fallback','fallback_reason':reason}
+        if request_id: out['request_id']=request_id
+        return out
 
     def _asr_language(self,language:str) -> str:
         names=dict(x.split(':',1) for x in self.asr_language_map.split(',') if ':' in x)
@@ -210,14 +246,35 @@ class Providers:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.asr_timeout,connect=min(3.0,self.asr_timeout)),trust_env=False) as c:
                 r=await c.post(f'https://{TENCENT_ASR_HOST}/',headers=headers,content=body)
-                r.raise_for_status();resp=r.json()['Response']
-        except (httpx.HTTPError,ValueError,KeyError,TypeError) as exc:
-            raise ProviderError('语音识别服务调用失败；本轮不计为答错') from exc
-        if not isinstance(resp,dict) or 'Error' in resp:
-            code=(resp.get('Error') or {}).get('Code','?') if isinstance(resp,dict) else '?'
-            raise ProviderError(f'腾讯云语音识别返回错误（{code}）；本轮不计为答错')
-        text=str(resp.get('Result') or '').strip()
-        return {'text':text,'confidence':None,'unclear':not bool(text),'provider':'tencent'}
+                r.raise_for_status();obj=r.json()
+        except httpx.TimeoutException as exc:
+            raise ProviderError('语音识别服务响应超时；本轮不计为答错',code='Timeout') from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError('语音识别服务调用失败；本轮不计为答错',code=f'HTTP{exc.response.status_code}') from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError('语音识别服务调用失败；本轮不计为答错',code='NetworkError') from exc
+        except ValueError as exc:
+            raise ProviderError('语音识别服务返回格式异常；本轮不计为答错',code='MalformedResponse') from exc
+        return self._parse_tencent(obj)
+
+    @staticmethod
+    def _parse_tencent(obj) -> dict:
+        """严格解析：只有字符串 Result 才算识别成功；其余一律是协议错误（走降级，不算“没听清”）。"""
+        resp=obj.get('Response') if isinstance(obj,dict) else None
+        if not isinstance(resp,dict):
+            raise ProviderError('腾讯云语音识别返回格式异常；本轮不计为答错',code='MalformedResponse')
+        rid=resp.get('RequestId') if isinstance(resp.get('RequestId'),str) else None
+        if 'Error' in resp:
+            err=resp['Error']
+            code=err['Code'] if isinstance(err,dict) and isinstance(err.get('Code'),str) and err['Code'] else 'MalformedError'
+            raise ProviderError(f'腾讯云语音识别返回错误（{code}）；本轮不计为答错',code=code,request_id=rid)
+        result=resp.get('Result')
+        if not isinstance(result,str):
+            raise ProviderError('腾讯云语音识别返回格式异常；本轮不计为答错',code='MalformedResponse',request_id=rid)
+        text=result.strip()
+        out={'text':text,'confidence':None,'unclear':not text,'provider':'tencent'}
+        if rid: out['request_id']=rid
+        return out
 
     async def _http_asr(self,data:bytes,language:str) -> dict:
         headers={'Authorization':'Bearer '+self.asr_key} if self.asr_key else {}
@@ -226,11 +283,21 @@ class Providers:
                 r=await c.post(self.asr_base.rstrip('/')+'/audio/transcriptions',headers=headers,
                                files={'file':('speech.wav',data,'audio/wav')},
                                data={'model':self.asr_model,'language':self._asr_language(language),'response_format':'json'})
-                r.raise_for_status();obj=r.json();text=obj.get('text','').strip()
-                # No confidence value is invented when the provider does not return one.
-                return {'text':text,'confidence':None,'unclear':not bool(text),'provider':'http'}
-        except (httpx.HTTPError,ValueError,AttributeError) as exc:
-            raise ProviderError('语音识别服务调用失败；本轮不计为答错') from exc
+                r.raise_for_status();obj=r.json()
+        except httpx.TimeoutException as exc:
+            raise ProviderError('语音识别服务响应超时；本轮不计为答错',code='Timeout') from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError('语音识别服务调用失败；本轮不计为答错',code=f'HTTP{exc.response.status_code}') from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError('语音识别服务调用失败；本轮不计为答错',code='NetworkError') from exc
+        except ValueError as exc:
+            raise ProviderError('语音识别服务返回格式异常；本轮不计为答错',code='MalformedResponse') from exc
+        text=obj.get('text') if isinstance(obj,dict) else None
+        if not isinstance(text,str):
+            raise ProviderError('语音识别服务返回格式异常；本轮不计为答错',code='MalformedResponse')
+        text=text.strip()
+        # No confidence value is invented when the provider does not return one.
+        return {'text':text,'confidence':None,'unclear':not text,'provider':'http'}
 
     def _vosk(self,pcm:bytes,rate:int,language:str) -> dict:
         path=self.vosk_zh if language=='zh' else self.vosk_en

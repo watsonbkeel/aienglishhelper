@@ -1,6 +1,7 @@
 """Service runner; supports a simple KEY=VALUE env file without executing shell code."""
 from __future__ import annotations
 import argparse
+import logging
 import os
 import shlex
 from pathlib import Path
@@ -23,6 +24,9 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('service',choices=['public','brain']);p.add_argument('--env',type=Path)
     a=p.parse_args()
     if a.env: load_env(a.env)
+    # uvicorn 只配置自己的 logger；本项目的诊断日志（识别供应商、降级原因、请求编号）单独输出到 journald。
+    handler=logging.StreamHandler();handler.setFormatter(logging.Formatter('%(levelname)s %(name)s %(message)s'))
+    app_log=logging.getLogger('english-class');app_log.setLevel(logging.INFO);app_log.addHandler(handler);app_log.propagate=False
     import uvicorn
     if a.service=='public':
         from .public_api import from_env

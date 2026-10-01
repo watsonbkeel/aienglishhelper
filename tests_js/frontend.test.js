@@ -51,6 +51,6 @@ test('report shows imitation separately from independent use', () => {
     {word_id:'a',status:1,last_practiced_date:'2026-09-29',unclear_count:0,valid_count:2,used_word_count:2,imitated_count:2},
     {word_id:'b',status:2,last_practiced_date:'2026-09-29',unclear_count:0},
   ]});
-  assert.equal(r.todayWords[0].evidenceText,'累计说出目标词 2 次，其中跟读/模仿 2 次（跟读不算会说）');
+  assert.equal(r.todayWords[0].evidenceText,'说出目标词 2 次；跟读/模仿 2 次（跟读不算会说）');
   assert.equal(r.todayWords[1].evidenceText,'');
 });
