@@ -237,7 +237,14 @@ def heard_wake(partial:str) -> bool:
 def route(edge,chat,text,confidence,wav):
     """一段语音的去向。上课优先：课中“小陈同学”只打断播报，不切去聊天。
     空闲时“小陈同学，学英语”上课，“小陈同学”聊天；聊天中的后续句子转交原机器人，再说“小陈同学，学英语”可直接切到上课。"""
-    action=control_action(text) if confidence>=0.70 else None
+    # 进入类指令（上课/聊天）阈值放宽到 0.60：唤醒词必须说对，但 Vosk 对
+    # 真人说话的平均置信度经常在 0.6-0.7 之间，0.70 会把正确的唤醒也丢掉。
+    # 课中控制指令（停止/暂停等）保持 0.70，避免误触发。
+    action=control_action(text)
+    if action in ('start','chat'):
+        if confidence<0.60: action=None
+    elif confidence<0.70:
+        action=None
     had_wake,rest=split_wake(text)
     if action=='start':
         chat.leave()
@@ -295,6 +302,7 @@ def voice_loop(edge,chat=None):
             wav=vad.feed(chunk)
             if wav:
                 text,confidence=recognize_chinese(model,wav)
+                LOG.info('听到 %r conf=%.2f',text,confidence)
                 route(edge,chat,text,confidence,wav)
             # 5 秒轮询一次，脑端据此判断 20 秒重问、3 分钟自动暂停（服务器决定，这里不计时）。
             if now-last_tick>TICK_SECONDS and edge.submit_tick(): last_tick=now
